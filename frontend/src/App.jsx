@@ -116,28 +116,47 @@ function NasaSatelliteMap({ nodes, selectedNode, onSelectNode, currentLayer, sho
   const mapContainerRef = useRef(null)
   const mapInstanceRef = useRef(null)
   const baseLayersRef = useRef({})
-  const overlayLayersRef = useRef([])
+  const labelsLayerRef = useRef(null)
   const markersRef = useRef({})
   const [leafletReady, setLeafletReady] = useState(Boolean(typeof window !== 'undefined' && window.L))
 
+  // Dynamically ensure Leaflet is loaded
   useEffect(() => {
-    if (leafletReady) return undefined
+    if (typeof window === 'undefined') return undefined
+    if (window.L) {
+      setLeafletReady(true)
+      return undefined
+    }
+
+    let isMounted = true
     const checkTimer = setInterval(() => {
-      if (typeof window !== 'undefined' && window.L) {
+      if (window.L && isMounted) {
         setLeafletReady(true)
         clearInterval(checkTimer)
       }
-    }, 150)
-    return () => clearInterval(checkTimer)
-  }, [leafletReady])
+    }, 100)
 
-  const latestNasaDate = useMemo(() => {
-    const d = new Date()
-    // NASA GIBS daily composites usually populate after 04:00 UTC
-    if (d.getUTCHours() < 4) {
-      d.setUTCDate(d.getUTCDate() - 1)
+    // Fallback script tag injector if head script didn't fire
+    if (!document.getElementById('leaflet-cdn-script')) {
+      const link = document.createElement('link')
+      link.id = 'leaflet-cdn-style'
+      link.rel = 'stylesheet'
+      link.href = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css'
+      document.head.appendChild(link)
+
+      const script = document.createElement('script')
+      script.id = 'leaflet-cdn-script'
+      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js'
+      script.onload = () => {
+        if (isMounted) setLeafletReady(true)
+      }
+      document.head.appendChild(script)
     }
-    return d.toISOString().split('T')[0]
+
+    return () => {
+      isMounted = false
+      clearInterval(checkTimer)
+    }
   }, [])
 
   useEffect(() => {
@@ -145,9 +164,14 @@ function NasaSatelliteMap({ nodes, selectedNode, onSelectNode, currentLayer, sho
     const L = window.L
     if (!L) return undefined
 
+    // Clean up existing map instance or residual container ID to prevent double-initialization
     if (mapInstanceRef.current) {
       mapInstanceRef.current.remove()
       mapInstanceRef.current = null
+    }
+    if (mapContainerRef.current._leaflet_id) {
+      mapContainerRef.current._leaflet_id = null
+      delete mapContainerRef.current._leaflet_id
     }
 
     const defaultLat = selectedNode?.lat || 28.6139
@@ -157,7 +181,7 @@ function NasaSatelliteMap({ nodes, selectedNode, onSelectNode, currentLayer, sho
       center: [defaultLat, defaultLon],
       zoom: 13,
       minZoom: 2,
-      maxZoom: 18,
+      maxZoom: 19,
       zoomControl: false,
       attributionControl: true,
     })
@@ -165,36 +189,36 @@ function NasaSatelliteMap({ nodes, selectedNode, onSelectNode, currentLayer, sho
 
     L.control.zoom({ position: 'bottom-right' }).addTo(map)
 
-    // 1. NASA Realtime VIIRS TrueColor (SNPP)
+    // 1. NASA Realtime VIIRS TrueColor (Suomi-NPP) - Latest available daily composite
     const viirsLayer = L.tileLayer(
-      `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_SNPP_CorrectedReflectance_TrueColor/default/${latestNasaDate}/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg`,
+      'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_SNPP_CorrectedReflectance_TrueColor/default/default/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg',
       {
         maxNativeZoom: 9,
-        maxZoom: 18,
+        maxZoom: 19,
         tileSize: 256,
         subdomains: 'abc',
         attribution: '&copy; <a href="https://earthdata.nasa.gov/gibs" target="_blank" rel="noreferrer">NASA EOSDIS GIBS</a>',
       }
     )
 
-    // 2. NASA Terra MODIS TrueColor
+    // 2. NASA Terra MODIS TrueColor - Daily multispectral reflectance
     const terraLayer = L.tileLayer(
-      `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/MODIS_Terra_CorrectedReflectance_TrueColor/default/${latestNasaDate}/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg`,
+      'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/MODIS_Terra_CorrectedReflectance_TrueColor/default/default/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg',
       {
         maxNativeZoom: 9,
-        maxZoom: 18,
+        maxZoom: 19,
         tileSize: 256,
         subdomains: 'abc',
         attribution: '&copy; <a href="https://earthdata.nasa.gov/gibs" target="_blank" rel="noreferrer">NASA Terra MODIS</a>',
       }
     )
 
-    // 3. NASA Earth at Night (Black Marble)
+    // 3. NASA Earth at Night (Black Marble) - Night lights observation
     const nightLayer = L.tileLayer(
       'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_BlackMarble/default/default/GoogleMapsCompatible_Level8/{z}/{y}/{x}.png',
       {
         maxNativeZoom: 8,
-        maxZoom: 18,
+        maxZoom: 19,
         tileSize: 256,
         subdomains: 'abc',
         attribution: '&copy; <a href="https://earthdata.nasa.gov/gibs" target="_blank" rel="noreferrer">NASA Black Marble</a>',
@@ -205,7 +229,7 @@ function NasaSatelliteMap({ nodes, selectedNode, onSelectNode, currentLayer, sho
     const streetSatLayer = L.tileLayer(
       'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
       {
-        maxZoom: 18,
+        maxZoom: 19,
         attribution: '&copy; Esri & OpenStreetMap',
       }
     )
@@ -217,37 +241,22 @@ function NasaSatelliteMap({ nodes, selectedNode, onSelectNode, currentLayer, sho
       'street-sat': streetSatLayer,
     }
 
-    const activeLayer = baseLayersRef.current[currentLayer] || viirsLayer
-    activeLayer.addTo(map)
+    const activeBase = baseLayersRef.current[currentLayer] || streetSatLayer
+    activeBase.addTo(map)
 
-    // NASA Coastlines, Rivers & Waterways Overlay
-    const featuresLayer = L.tileLayer(
-      'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/Reference_Features_15m/default/default/GoogleMapsCompatible_Level9/{z}/{y}/{x}.png',
+    // Transparent dark street, waterway & place labels overlay
+    const labels = L.tileLayer(
+      'https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png',
       {
-        maxNativeZoom: 9,
-        maxZoom: 18,
-        tileSize: 256,
-        opacity: 0.85,
-        zIndex: 500,
+        subdomains: 'abcd',
+        maxZoom: 19,
+        zIndex: 600,
+        attribution: '&copy; <a href="https://carto.com/">CARTO</a>',
       }
     )
-
-    // NASA Place Labels Overlay
-    const labelsLayer = L.tileLayer(
-      'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/Reference_Labels_15m/default/default/GoogleMapsCompatible_Level9/{z}/{y}/{x}.png',
-      {
-        maxNativeZoom: 9,
-        maxZoom: 18,
-        tileSize: 256,
-        opacity: 0.9,
-        zIndex: 501,
-      }
-    )
-
-    overlayLayersRef.current = [featuresLayer, labelsLayer]
+    labelsLayerRef.current = labels
     if (showOverlays) {
-      featuresLayer.addTo(map)
-      labelsLayer.addTo(map)
+      labels.addTo(map)
     }
 
     // Boundary box for 24 River View Lane
@@ -307,18 +316,25 @@ function NasaSatelliteMap({ nodes, selectedNode, onSelectNode, currentLayer, sho
       markersRef.current[node.id] = marker
     })
 
-    const timer = setTimeout(() => {
-      map.invalidateSize()
-    }, 200)
+    // Invalidate size on load and on window resize to ensure full 640px height rendering
+    const timers = [
+      setTimeout(() => map.invalidateSize(), 100),
+      setTimeout(() => map.invalidateSize(), 300),
+      setTimeout(() => map.invalidateSize(), 700),
+    ]
+
+    const handleResize = () => map.invalidateSize()
+    window.addEventListener('resize', handleResize)
 
     return () => {
-      clearTimeout(timer)
+      timers.forEach(clearTimeout)
+      window.removeEventListener('resize', handleResize)
       if (mapInstanceRef.current) {
         mapInstanceRef.current.remove()
         mapInstanceRef.current = null
       }
     }
-  }, [leafletReady, latestNasaDate])
+  }, [leafletReady])
 
   // Switch base layers
   useEffect(() => {
@@ -338,14 +354,13 @@ function NasaSatelliteMap({ nodes, selectedNode, onSelectNode, currentLayer, sho
   // Switch overlays
   useEffect(() => {
     const map = mapInstanceRef.current
-    if (!map || !overlayLayersRef.current) return
-    overlayLayersRef.current.forEach((layer) => {
-      if (showOverlays) {
-        if (!map.hasLayer(layer)) layer.addTo(map)
-      } else {
-        if (map.hasLayer(layer)) map.removeLayer(layer)
-      }
-    })
+    const labels = labelsLayerRef.current
+    if (!map || !labels) return
+    if (showOverlays) {
+      if (!map.hasLayer(labels)) labels.addTo(map)
+    } else {
+      if (map.hasLayer(labels)) map.removeLayer(labels)
+    }
   }, [showOverlays])
 
   // Pan to selected node
@@ -359,16 +374,26 @@ function NasaSatelliteMap({ nodes, selectedNode, onSelectNode, currentLayer, sho
     }
   }, [selectedNode])
 
-  if (!leafletReady) {
-    return (
-      <div className="dark-map-canvas" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', color: '#dedbd7' }}>
-        <div className="badge-pill purple" style={{ marginBottom: 12 }}>Connecting to NASA EOSDIS GIBS...</div>
-        <small style={{ color: '#8c8884' }}>Streaming live Earth observations & satellite telemetry</small>
-      </div>
-    )
-  }
-
-  return <div ref={mapContainerRef} id="nasa-leaflet-map" style={{ width: '100%', height: '100%' }} />
+  return (
+    <div
+      ref={mapContainerRef}
+      id="nasa-leaflet-map"
+      style={{
+        width: '100%',
+        height: '100%',
+        position: 'absolute',
+        inset: 0,
+        background: '#131211',
+      }}
+    >
+      {!leafletReady && (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', flexDirection: 'column', color: '#dedbd7' }}>
+          <div className="badge-pill purple" style={{ marginBottom: 12 }}>Connecting to NASA EOSDIS GIBS...</div>
+          <small style={{ color: '#8c8884' }}>Streaming live Earth observations & satellite telemetry</small>
+        </div>
+      )}
+    </div>
+  )
 }
 
 // --- SVG Chart Component ---
