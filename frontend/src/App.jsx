@@ -21,8 +21,9 @@ import {
   SlidersHorizontal,
   X,
 } from 'lucide-react'
-import { auth, firebaseReady } from './firebase'
+import { auth, db, firebaseReady } from './firebase'
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from 'firebase/auth'
+import { addDoc, collection, doc, limit, onSnapshot, orderBy, query, serverTimestamp, updateDoc } from 'firebase/firestore'
 import sujalLogo from './assets/sujal_monochrome_symbol_white.svg'
 import './App.css'
 
@@ -91,12 +92,12 @@ const MONTHLY_DATASETS = [
 const TELEMETRY_LOGS = [
   { id: 'EVT-2026-1027-0009', time: '10:31:04 IST', node: 'SJ-014', type: 'DATA QUALITY', status: 'INCOMPLETE', payload: 'Telemetry gap detected — 92% packet completeness over last hour', score: 81 },
   { id: 'EVT-2026-1027-0008', time: '10:30:47 IST', node: 'SJ-014', type: 'MEASUREMENT', status: 'INGESTED', payload: 'Turbidity 5.8 NTU exceeds SJ-014 configured limit 5.0 NTU', score: 78 },
-  { id: 'EVT-2026-1027-0007', time: '10:29:58 IST', node: 'SJ-014', type: 'AI INTERPRET', status: 'PENDING REVIEW', payload: 'AI model flagged multi-parameter correlation; turbidity rise + DO stable', score: 42 },
-  { id: 'EVT-2026-1027-0006', time: '10:28:30 IST', node: 'SJ-014', type: 'MEASUREMENT', status: 'INGESTED', payload: 'Turbidity 5.6 NTU · pH 7.2 · Temp 24.5 °C · DO 6.4 mg/L', score: 12 },
+  { id: 'EVT-2026-1027-0007', time: '10:29:58 IST', node: 'SJ-014', type: 'AI INTERPRET', status: 'PENDING REVIEW', payload: 'AI model flagged multi-parameter correlation; turbidity rise + MQ5 stable', score: 42 },
+  { id: 'EVT-2026-1027-0006', time: '10:28:30 IST', node: 'SJ-014', type: 'MEASUREMENT', status: 'INGESTED', payload: 'Turbidity 5.6 NTU · pH 7.2 · Temp 24.5 °C · MQ5 0.66 V', score: 12 },
   { id: 'EVT-2026-1027-0005', time: '10:25:00 IST', node: 'SJ-014', type: 'DATA QUALITY', status: 'DROPPED', payload: '3 consecutive packets dropped (seq 0x4A1C-0x4A1E). Uplink RSSI -92 dBm', score: 55 },
-  { id: 'EVT-2026-1027-0004', time: '10:20:01 IST', node: 'SJ-014', type: 'MEASUREMENT', status: 'INGESTED', payload: 'Turbidity 4.9 NTU · pH 7.1 · Temp 24.5 °C · DO 6.5 mg/L', score: 10 },
+  { id: 'EVT-2026-1027-0004', time: '10:20:01 IST', node: 'SJ-014', type: 'MEASUREMENT', status: 'INGESTED', payload: 'Turbidity 4.9 NTU · pH 7.1 · Temp 24.5 °C · MQ5 0.65 V', score: 10 },
   { id: 'EVT-2026-1027-0003', time: '10:00:00 IST', node: 'SJ-014', type: 'SYSTEM', status: 'ACKNOWLEDGED', payload: 'Configured operating limit updated: 4.5 -> 5.0 NTU by illustrative operator', score: 8 },
-  { id: 'EVT-2026-1027-0002', time: '09:50:15 IST', node: 'SJ-014', type: 'MEASUREMENT', status: 'INGESTED', payload: 'Turbidity 4.7 NTU · pH 7.0 · Temp 24.1 °C · DO 6.6 mg/L', score: 11 },
+  { id: 'EVT-2026-1027-0002', time: '09:50:15 IST', node: 'SJ-014', type: 'MEASUREMENT', status: 'INGESTED', payload: 'Turbidity 4.7 NTU · pH 7.0 · Temp 24.1 °C · MQ5 0.64 V', score: 11 },
   { id: 'EVT-2026-1027-0001', time: '09:31:02 IST', node: 'SJ-014', type: 'SYSTEM', status: 'ACKNOWLEDGED', payload: 'Device boot complete. Firmware v3.1.7. Sensor self-test passed.', score: 6 },
 ]
 
@@ -124,7 +125,7 @@ function AreaTrendChart({ dataPoints, minVal, maxVal, color = '#2c94bd', showExc
 
   const valRange = maxVal - minVal || 1
   const coords = dataPoints.map((pt, i) => {
-    const x = padL + (i * plotW) / (dataPoints.length - 1)
+    const x = dataPoints.length === 1 ? padL + plotW / 2 : padL + (i * plotW) / (dataPoints.length - 1)
     const y = padT + plotH - ((pt.val - minVal) / valRange) * plotH
     return { x, y, val: pt.val, time: pt.time }
   })
@@ -202,27 +203,86 @@ export default function App() {
   const [user, setUser] = useState(null)
   const [loginOpen, setLoginOpen] = useState(false)
   const [toastMsg, setToastMsg] = useState('')
+  const [liveState, setLiveState] = useState(null)
+  const [liveReadings, setLiveReadings] = useState([])
+  const [liveAlerts, setLiveAlerts] = useState(null)
+  const [liveCommands, setLiveCommands] = useState([])
+  const [firestoreError, setFirestoreError] = useState('')
+  const [commandBusy, setCommandBusy] = useState(false)
 
   useEffect(() => {
     if (!firebaseReady) return undefined
-    return onAuthStateChanged(auth, setUser)
+    return onAuthStateChanged(auth, (nextUser) => {
+      setUser(nextUser)
+      if (!nextUser) {
+        setLiveState(null)
+        setLiveReadings([])
+        setLiveAlerts(null)
+        setLiveCommands([])
+        setFirestoreError('')
+      }
+    })
   }, [])
+
+  useEffect(() => {
+    if (!firebaseReady || !user || !db) return undefined
+    const device = doc(db, 'devices', 'SUJAL_01')
+    const unsubscribers = [
+      onSnapshot(doc(device, 'state', 'latest'), (snapshot) => setLiveState(snapshot.exists() ? snapshot.data() : null), (error) => setFirestoreError(error.message)),
+      onSnapshot(query(collection(device, 'readings'), orderBy('recorded_at', 'desc'), limit(60)), (snapshot) => setLiveReadings(snapshot.docs.map((item) => ({ id: item.id, ...item.data() })).reverse()), (error) => setFirestoreError(error.message)),
+      onSnapshot(query(collection(device, 'alerts'), orderBy('updated_at', 'desc'), limit(30)), (snapshot) => setLiveAlerts(snapshot.docs.map((item) => ({ id: item.id, ...item.data() }))), (error) => setFirestoreError(error.message)),
+      onSnapshot(query(collection(device, 'commands'), orderBy('created_at', 'desc'), limit(10)), (snapshot) => setLiveCommands(snapshot.docs.map((item) => ({ id: item.id, ...item.data() }))), (error) => setFirestoreError(error.message)),
+    ]
+    return () => unsubscribers.forEach((unsubscribe) => unsubscribe())
+  }, [user])
 
   const triggerToast = (msg) => {
     setToastMsg(msg)
     setTimeout(() => setToastMsg(''), 3500)
   }
 
-  const handleAcknowledgeAlert = (id) => {
+  const handleAcknowledgeAlert = async (id) => {
+    if (user && db && liveAlerts) {
+      try {
+        await updateDoc(doc(db, 'devices', 'SUJAL_01', 'alerts', id), {
+          status: 'acknowledged', acknowledged_by: user.uid,
+          acknowledged_at: serverTimestamp(), updated_at: serverTimestamp(),
+        })
+        triggerToast(`Alert ${id} acknowledged.`)
+      } catch (error) { triggerToast(`Could not acknowledge alert: ${error.message}`) }
+      return
+    }
     setAlertsList((prev) =>
       prev.map((a) => (a.id === id ? { ...a, status: 'Acknowledged', severity: 'Resolved' } : a))
     )
     triggerToast(`Alert ${id} acknowledged.`)
   }
 
+  const queueDeviceCommand = async (command, value) => {
+    if (!user || !db) { setLoginOpen(true); return }
+    setCommandBusy(true)
+    try {
+      const fields = command === 'SET_CHANNEL' ? { selected_channel: value } : { mode: value }
+      await addDoc(collection(db, 'devices', 'SUJAL_01', 'commands'), {
+        command, status: 'pending', requested_by: user.uid, created_at: serverTimestamp(), ...fields,
+      })
+      triggerToast(`${command === 'SET_CHANNEL' ? `Branch ${value}` : `Mode ${value}`} command queued for ESP32.`)
+    } catch (error) { triggerToast(`Command was not queued: ${error.message}`) }
+    finally { setCommandBusy(false) }
+  }
+
   const downloadCsvMock = (name) => {
-    triggerToast(`Exporting ${name}...`)
-    const blob = new Blob([`Timestamp,Node,Turbidity,pH,Temperature,DO,Salinity\n2026-10-27T10:32:15Z,SJ-014,5.8,7.2,24.6,6.4,0.32\n`], { type: 'text/csv' })
+    const headers = ['recorded_at', 'device_id', 'sequence', 'temperature_c', 'ph', 'turbidity_ntu', 'mq5_voltage', 'inlet_flow_lpm', 'channel_a_flow_lpm', 'channel_b_flow_lpm', 'selected_channel', 'mode']
+    const rows = liveReadings.map((item) => [
+      item.recorded_at?.toDate?.().toISOString() || '', item.device_id || 'SUJAL_01', item.sequence ?? '',
+      item.sensor_data?.temperature_sensor?.value ?? '', item.sensor_data?.ph_sensor?.value ?? '',
+      item.sensor_data?.turbidity_sensor?.value ?? '', item.sensor_data?.mq5_sensor?.voltage ?? '',
+      item.sensor_data?.flow_sensors?.inlet?.flow_rate_lpm ?? '', item.sensor_data?.flow_sensors?.channel_a?.flow_rate_lpm ?? '',
+      item.sensor_data?.flow_sensors?.channel_b?.flow_rate_lpm ?? '', item.selected_channel || '', item.mode || '',
+    ])
+    const escapeCsv = (value) => `"${String(value).replaceAll('"', '""')}"`
+    const csv = [headers, ...rows].map((row) => row.map(escapeCsv).join(',')).join('\n')
+    const blob = new Blob([csv || `${headers.join(',')}\n`], { type: 'text/csv;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
@@ -235,29 +295,43 @@ export default function App() {
 
   // 1. Water Quality Monitor Screen
   const renderMonitorScreen = () => {
-    const tempPoints = [
+    const sensors = liveState?.sensor_data
+    const reading = (value, digits = 1) => typeof value === 'number' ? value.toFixed(digits) : '—'
+    const temp = sensors?.temperature_sensor?.value
+    const ph = sensors?.ph_sensor?.value
+    const turbidity = sensors?.turbidity_sensor?.value
+    const gas = sensors?.mq5_sensor?.voltage
+    const flow = sensors?.flow_sensors
+    const feedback = liveState?.actuator_feedback
+    const selectedChannel = liveState?.selected_channel || 'A'
+    const livePoints = (key) => liveReadings.map((item) => {
+      const val = key(item)
+      const date = item.recorded_at?.toDate?.()
+      return typeof val === 'number' ? { val, time: date ? date.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : '' } : null
+    }).filter(Boolean).slice(-12)
+    const demoTempPoints = [
       { time: '09:00', val: 24.1 },
       { time: '09:30', val: 24.3 },
       { time: '10:00', val: 24.4 },
       { time: '10:32', val: 24.6 },
     ]
-    const phPoints = [
+    const demoPhPoints = [
       { time: '09:00', val: 7.0 },
       { time: '09:30', val: 7.1 },
       { time: '10:00', val: 7.25 },
       { time: '10:32', val: 7.2 },
     ]
-    const turbPoints = [
+    const demoTurbPoints = [
       { time: '09:00', val: 4.1 },
       { time: '09:30', val: 4.7 },
       { time: '10:00', val: 5.2 },
       { time: '10:32', val: 5.8 },
     ]
-    const doPoints = [
-      { time: '09:00', val: 6.6 },
-      { time: '09:30', val: 6.5 },
-      { time: '10:00', val: 6.3 },
-      { time: '10:32', val: 6.4 },
+    const demoMq5Points = [
+      { time: '09:00', val: 0.64 },
+      { time: '09:30', val: 0.65 },
+      { time: '10:00', val: 0.67 },
+      { time: '10:32', val: 0.66 },
     ]
     const packPoints = [
       { time: '09:00', val: 100 },
@@ -265,6 +339,11 @@ export default function App() {
       { time: '10:00', val: 89 },
       { time: '10:32', val: 92 },
     ]
+    const tempPoints = livePoints((item) => item.sensor_data?.temperature_sensor?.value)
+    const phPoints = livePoints((item) => item.sensor_data?.ph_sensor?.value)
+    const turbPoints = livePoints((item) => item.sensor_data?.turbidity_sensor?.value)
+    const mq5Points = livePoints((item) => item.sensor_data?.mq5_sensor?.voltage)
+    const chartData = (points, demo, currentValue) => points.length ? points : liveState && typeof currentValue === 'number' ? [{ time: 'Now', val: currentValue }] : demo
 
     return (
       <div className="view-container">
@@ -273,13 +352,13 @@ export default function App() {
           <div>
             <h1 className="view-title">Water Quality Monitor</h1>
             <p className="view-subtitle">
-              SJ-014 · River View inlet · 24 River View Lane, North River district · Snapshot 27 Oct 2026, 10:32:15 IST
+              {liveState ? `SUJAL_01 · Live device telemetry · Sequence ${liveState.sequence ?? '—'}` : 'Demo preview · waiting for authenticated live telemetry'}
             </p>
           </div>
           <div className="header-right-meta">
             <span className="node-chip">
               <i className="chip-icon-drop" />
-              SJ-014 · River View inlet <small>Provisional nearest-node assignment</small>
+              SUJAL_01 <small>{liveState ? 'Firestore live state' : 'Demo preview'}</small>
             </span>
             <button className="btn-secondary-flat" onClick={() => setActiveTab('Profile')}>
               <Settings2 size={14} /> Profile
@@ -295,9 +374,9 @@ export default function App() {
               <span className="badge-pill blue">● Live</span>
             </div>
             <div className="metric-huge">
-              24.6 <span className="unit">°C</span>
+              {reading(temp)} <span className="unit">°C</span>
             </div>
-            <div className="metric-foot">Illustrative reading · 10:32:15 IST</div>
+            <div className="metric-foot">{liveState ? 'Live ESP32 reading' : 'Illustrative demo reading'}</div>
           </div>
 
           <div className="card metric-card">
@@ -306,9 +385,9 @@ export default function App() {
               <span className="badge-pill blue">● Live</span>
             </div>
             <div className="metric-huge">
-              7.2 <span className="unit">pH</span>
+              {reading(ph, 2)} <span className="unit">pH</span>
             </div>
-            <div className="metric-foot">Illustrative reading · 10:32:15 IST</div>
+            <div className="metric-foot">{sensors?.ph_sensor?.calibrated ? 'Calibrated sensor' : 'Calibration status unverified'}</div>
           </div>
 
           <div className="card metric-card">
@@ -317,21 +396,46 @@ export default function App() {
               <span className="badge-pill orange">● Excursion</span>
             </div>
             <div className="metric-huge text-orange">
-              5.8 <span className="unit">NTU</span>
+              {reading(turbidity)} <span className="unit">NTU</span>
             </div>
-            <div className="metric-foot text-orange">Exceeds illustrative node limit 5.0 NTU · 10:32:15 IST</div>
+            <div className="metric-foot text-orange">{turbidity > 5 ? 'Above demo alert threshold 5 NTU' : 'Sensor reading · not a potability determination'}</div>
           </div>
 
           <div className="card metric-card">
             <div className="card-top">
-              <span className="card-lbl">Dissolved oxygen</span>
+              <span className="card-lbl">MQ5 Gas</span>
               <span className="badge-pill blue">● Live</span>
             </div>
             <div className="metric-huge">
-              6.4 <span className="unit">mg/L</span>
+              {reading(gas, 2)} <span className="unit">V</span>
             </div>
-            <div className="metric-foot">Illustrative reading · 10:32:15 IST</div>
+            <div className="metric-foot">Gas above water · separate from water quality</div>
           </div>
+        </div>
+
+        <div className="card top-gap" style={{ padding: 18 }}>
+          <div className="table-header-split">
+            <div><h2>Branch control and device status</h2><p>{user ? 'Commands are recorded in Firestore and delivered when the ESP32 polls.' : 'Sign in as an assigned operator to issue valve commands.'}</p></div>
+            <span className={`badge-pill ${feedback?.slave_online ? 'blue' : 'amber'}`}>{feedback?.slave_online ? 'Controller online' : 'Controller status unknown'}</span>
+          </div>
+          <div className="header-right-meta" style={{ justifyContent: 'flex-start', flexWrap: 'wrap', gap: 10 }}>
+            <span className="badge-pill muted">Mode: {liveState?.mode || '—'}</span>
+            <span className="badge-pill muted">Active branch: {feedback?.active_channel || selectedChannel}</span>
+            <span className="badge-pill muted">A flow: {reading(flow?.channel_a?.flow_rate_lpm, 2)} L/min</span>
+            <span className="badge-pill muted">B flow: {reading(flow?.channel_b?.flow_rate_lpm, 2)} L/min</span>
+            <button className="btn-action-primary" disabled={commandBusy} onClick={() => queueDeviceCommand('SET_CHANNEL', 'A')}>Switch to A</button>
+            <button className="btn-action-primary" disabled={commandBusy} onClick={() => queueDeviceCommand('SET_CHANNEL', 'B')}>Switch to B</button>
+            <button className="btn-action-secondary" disabled={commandBusy} onClick={() => queueDeviceCommand('SET_MODE', liveState?.mode === 'AUTO' ? 'MANUAL' : 'AUTO')}>Toggle Auto / Manual</button>
+          </div>
+          <div className="bar-meta-row" style={{ marginTop: 12 }}>
+            <span>Treatment stage: {liveState?.treatment?.stage || '—'}</span>
+            <span>Treatment status: {liveState?.treatment?.status || '—'}</span>
+            <span>Outlet pH: {reading(liveState?.verification_data?.ph_sensor?.value, 2)}</span>
+            <span>Outlet turbidity: {reading(liveState?.verification_data?.turbidity_sensor?.value, 2)} NTU</span>
+            <span>Verification: {liveState?.treatment?.verification || 'No verification status reported'}</span>
+          </div>
+          {liveCommands.length > 0 && <small>Latest command: {liveCommands[0].command} · {liveCommands[0].status} · {liveCommands[0].id}</small>}
+          {firestoreError && <p className="text-orange" role="alert">Firestore access error: {firestoreError}. Check that this account has operator access to SUJAL_01.</p>}
         </div>
 
         {/* Row 2: 4 Diagnostic / Status Cards */}
@@ -387,7 +491,7 @@ export default function App() {
               <span className="badge-pill blue">● Sample</span>
             </div>
             <p className="diag-desc">
-              Temperature ↔ dissolved oxygen. Illustrative 24 h paired analysis; correlation is not causation.
+              Temperature ↔ MQ5 gas. Illustrative 24 h paired analysis; correlation is not causation.
             </p>
             <div className="diag-rows">
               <div><span>Sample size</span><b>128</b></div>
@@ -404,7 +508,7 @@ export default function App() {
               <span className="diag-heading">Temperature</span>
               <span className="badge-pill blue">● Live</span>
             </div>
-            <AreaTrendChart dataPoints={tempPoints} minVal={18} maxVal={26} color="#34a4ce" yLabels={[18, 20, 22, 24, 26]} />
+            <AreaTrendChart dataPoints={chartData(tempPoints, demoTempPoints, temp)} minVal={18} maxVal={26} color="#34a4ce" yLabels={[18, 20, 22, 24, 26]} />
           </div>
 
           <div className="card chart-panel">
@@ -412,7 +516,7 @@ export default function App() {
               <span className="diag-heading">pH</span>
               <span className="badge-pill blue">● Live</span>
             </div>
-            <AreaTrendChart dataPoints={phPoints} minVal={6.0} maxVal={8.0} color="#34a4ce" yLabels={[6.0, 6.5, 7.0, 7.5, 8.0]} />
+            <AreaTrendChart dataPoints={chartData(phPoints, demoPhPoints, ph)} minVal={6.0} maxVal={8.0} color="#34a4ce" yLabels={[6.0, 6.5, 7.0, 7.5, 8.0]} />
           </div>
 
           <div className="card chart-panel">
@@ -420,15 +524,15 @@ export default function App() {
               <span className="diag-heading">Turbidity</span>
               <span className="badge-pill orange">● Excursion</span>
             </div>
-            <AreaTrendChart dataPoints={turbPoints} minVal={0} maxVal={8} color="#e06836" showExcursion excursionLimit={5.0} yLabels={[0, 2, 4, 6, 8]} />
+            <AreaTrendChart dataPoints={chartData(turbPoints, demoTurbPoints, turbidity)} minVal={0} maxVal={8} color="#e06836" showExcursion excursionLimit={5.0} yLabels={[0, 2, 4, 6, 8]} />
           </div>
 
           <div className="card chart-panel">
             <div className="card-top">
-              <span className="diag-heading">Dissolved oxygen</span>
+              <span className="diag-heading">MQ5 Gas</span>
               <span className="badge-pill blue">● Live</span>
             </div>
-            <AreaTrendChart dataPoints={doPoints} minVal={4} maxVal={8} color="#34a4ce" yLabels={[4, 5, 6, 7, 8]} />
+            <AreaTrendChart dataPoints={chartData(mq5Points, demoMq5Points, gas)} minVal={0.4} maxVal={0.8} color="#34a4ce" yLabels={[0.4, 0.5, 0.6, 0.7, 0.8]} />
           </div>
         </div>
 
@@ -489,6 +593,16 @@ export default function App() {
 
   // 2. Alerts Queue Screen
   const renderAlertsScreen = () => {
+    const displayedAlerts = liveAlerts ? liveAlerts.map((item) => ({
+      ...item,
+      severity: item.severity === 'high' ? 'High' : 'Review',
+      type: item.id === 'turbidity-excursion' ? 'Measured excursion' : 'Device / data quality',
+      node: 'SUJAL_01 · SuJal device',
+      time: item.updated_at?.toDate?.().toLocaleString('en-IN') || 'Live',
+      status: item.status || 'open', triageScore: '—',
+      actionSteps: [item.detail || 'Review current sensor and actuator readings.'],
+    })) : alertsList
+    const currentAlert = displayedAlerts.find((item) => item.id === selectedAlert.id) || displayedAlerts[0] || ALERTS_DATA[0]
     return (
       <div className="view-container">
         <header className="view-header">
@@ -508,7 +622,7 @@ export default function App() {
         <div className="card hero-alert-card">
           <div className="hero-alert-header">
             <div>
-              <div className="hero-node-title">{selectedAlert.node}</div>
+              <div className="hero-node-title">{currentAlert.node}</div>
               <p className="hero-node-sub">
                 24 River View Lane, North River district · Provisional nearest-node mapping · Household supply connection not confirmed
               </p>
@@ -534,7 +648,7 @@ export default function App() {
             </div>
             <div className="triage-stat">
               <small>Operational triage</small>
-              <b className="text-orange">{selectedAlert.triageScore}</b>
+              <b className="text-orange">{currentAlert.triageScore}</b>
               <span>Illustrative prioritization score</span>
             </div>
           </div>
@@ -556,8 +670,8 @@ export default function App() {
                   <b className="text-orange">5.8 NTU</b>
                 </div>
                 <div className="m-box">
-                  <small>DO</small>
-                  <b>6.4 mg/L</b>
+                  <small>MQ5</small>
+                  <b>0.66 V</b>
                 </div>
                 <div className="m-box">
                   <small>Salinity</small>
@@ -566,7 +680,7 @@ export default function App() {
               </div>
 
               <div className="hero-actions-row">
-                <button className="btn-action-primary" onClick={() => handleAcknowledgeAlert(selectedAlert.id)}>
+                <button className="btn-action-primary" onClick={() => handleAcknowledgeAlert(currentAlert.id)}>
                   <Check size={14} /> Acknowledge
                 </button>
                 <button className="btn-action-secondary" onClick={() => triggerToast('Opening review panel...')}>
@@ -581,7 +695,7 @@ export default function App() {
             <div className="actionable-steps-card">
               <div className="col-subheading">Actionable operator next steps</div>
               <ul className="actionable-checklist">
-                {selectedAlert.actionSteps.map((step, i) => (
+                {currentAlert.actionSteps.map((step, i) => (
                   <li key={i}>
                     <span className="step-dot" />
                     <span>{step}</span>
@@ -609,10 +723,10 @@ export default function App() {
           <div className="table-responsive">
             <table className="sujal-table">
               <tbody>
-                {alertsList.map((alt) => (
+                {displayedAlerts.map((alt) => (
                   <tr
                     key={alt.id}
-                    className={`alert-row-item ${selectedAlert.id === alt.id ? 'active-row' : ''}`}
+                    className={`alert-row-item ${currentAlert.id === alt.id ? 'active-row' : ''}`}
                     onClick={() => setSelectedAlert(alt)}
                   >
                     <td className="w-severity">
@@ -668,7 +782,7 @@ export default function App() {
           <div>
             <h1 className="view-title">Records</h1>
             <p className="view-subtitle">
-              Monthly sensor-data browser for SJ-014 · River View inlet. Newest first, with completeness and CSV export for each period.
+              {liveReadings.length ? `Live sensor history for SUJAL_01 · ${liveReadings.length} latest packets loaded. Download exports the loaded live readings.` : 'Live sensor history for SUJAL_01 will appear after telemetry arrives and your operator account is authorized.'}
             </p>
           </div>
           <button className="btn-secondary-flat" onClick={() => setActiveTab('Profile')}>
@@ -678,15 +792,13 @@ export default function App() {
 
         <div className="card node-context-bar">
           <div className="bar-left">
-            <b>SJ-014 · River View inlet</b>
-            <span>24 River View Lane, North River district</span>
+            <b>SUJAL_01 · SuJal device</b>
+            <span>Device location is not configured</span>
           </div>
           <div className="bar-meta-row">
-            <span>Snapshot 27 Oct 2026 10:32:15 IST</span>
-            <span>Connection: Household supply not confirmed</span>
-            <span>Node SJ-014</span>
-            <span className="badge-pill green">● Active</span>
-            <span className="badge-pill muted">Provisional</span>
+            <span>Sequence {liveState?.sequence ?? '—'}</span>
+            <span>Commanded channel: {liveState?.selected_channel || '—'}</span>
+            <span className={`badge-pill ${liveState ? 'green' : 'muted'}`}>{liveState ? '● Telemetry received' : 'Waiting for telemetry'}</span>
           </div>
         </div>
 
@@ -765,28 +877,33 @@ export default function App() {
                   <th>Temp</th>
                   <th>pH</th>
                   <th>Turbidity</th>
-                  <th>Dissolved Oxygen</th>
-                  <th>Salinity</th>
+                  <th>MQ5 Gas</th>
+                  <th>Channel A / B flow</th>
                   <th>Status</th>
                 </tr>
               </thead>
               <tbody>
-                {[
-                  { t: '27 Oct 2026 10:32:15', temp: '24.6 °C', ph: '7.2', turb: '5.8 NTU', do: '6.4 mg/L', sal: '0.32 ppt' },
-                  { t: '27 Oct 2026 10:31:15', temp: '24.5 °C', ph: '7.2', turb: '5.7 NTU', do: '6.4 mg/L', sal: '0.32 ppt' },
-                  { t: '27 Oct 2026 10:30:15', temp: '24.5 °C', ph: '7.2', turb: '5.6 NTU', do: '6.4 mg/L', sal: '0.32 ppt' },
-                  { t: '27 Oct 2026 10:29:15', temp: '24.4 °C', ph: '7.2', turb: '5.6 NTU', do: '6.4 mg/L', sal: '0.32 ppt' },
-                  { t: '27 Oct 2026 10:28:15', temp: '24.4 °C', ph: '7.2', turb: '5.5 NTU', do: '6.4 mg/L', sal: '0.32 ppt' },
-                ].map((row, i) => (
+                {(liveReadings.length ? [...liveReadings].reverse().slice(0, 20).map((item) => {
+                  const date = item.recorded_at?.toDate?.()
+                  const val = (value, unit = '') => typeof value === 'number' ? `${value} ${unit}`.trim() : '—'
+                  const turb = item.sensor_data?.turbidity_sensor?.value
+                  return { t: date?.toLocaleString('en-IN') || '—', temp: val(item.sensor_data?.temperature_sensor?.value, '°C'), ph: val(item.sensor_data?.ph_sensor?.value), turb: val(turb, 'NTU'), mq5: val(item.sensor_data?.mq5_sensor?.voltage, 'V'), flow: `${val(item.sensor_data?.flow_sensors?.channel_a?.flow_rate_lpm)} / ${val(item.sensor_data?.flow_sensors?.channel_b?.flow_rate_lpm)} L/min`, status: turb > 5 ? 'Above 5 NTU demo threshold' : 'Sensor value only' }
+                }) : [
+                  { t: '27 Oct 2026 10:32:15', temp: '24.6 °C', ph: '7.2', turb: '5.8 NTU', mq5: '0.66 V', sal: '0.32 ppt' },
+                  { t: '27 Oct 2026 10:31:15', temp: '24.5 °C', ph: '7.2', turb: '5.7 NTU', mq5: '0.66 V', sal: '0.32 ppt' },
+                  { t: '27 Oct 2026 10:30:15', temp: '24.5 °C', ph: '7.2', turb: '5.6 NTU', mq5: '0.66 V', sal: '0.32 ppt' },
+                  { t: '27 Oct 2026 10:29:15', temp: '24.4 °C', ph: '7.2', turb: '5.6 NTU', mq5: '0.66 V', sal: '0.32 ppt' },
+                  { t: '27 Oct 2026 10:28:15', temp: '24.4 °C', ph: '7.2', turb: '5.5 NTU', mq5: '0.66 V', sal: '0.32 ppt' },
+                ]).map((row, i) => (
                   <tr key={i}>
                     <td>{row.t}</td>
                     <td>{row.temp}</td>
                     <td>{row.ph}</td>
                     <td className="text-orange">{row.turb}</td>
-                    <td>{row.do}</td>
-                    <td>{row.sal}</td>
+                    <td>{row.mq5}</td>
+                    <td>{row.flow || row.sal || 'Illustrative'}</td>
                     <td>
-                      <span className="badge-pill amber">High turbidity</span>
+                      <span className={`badge-pill ${row.status?.includes('Above') || row.turb?.startsWith('5.') ? 'amber' : 'green'}`}>{row.status || 'Illustrative data'}</span>
                     </td>
                   </tr>
                 ))}
@@ -794,7 +911,7 @@ export default function App() {
             </table>
           </div>
           <div className="table-footer-actions">
-            <small>Illustrative data · CSV: SJ-014_2026-10.csv</small>
+            <small>{liveReadings.length ? `Live data · ${liveReadings.length} most recent readings` : 'Illustrative preview · waiting for Firestore telemetry'}</small>
             <button className="btn-action-primary" onClick={() => downloadCsvMock(`SJ-014_${filterMonthTab.replace(' ', '_')}.csv`)}>
               <Download size={14} /> Download CSV
             </button>
@@ -961,7 +1078,7 @@ export default function App() {
                   <span>pH</span>
                   <span>Turbidity (NTU)</span>
                   <span>Temperature (°C)</span>
-                  <span>DO (mg/L)</span>
+                  <span>MQ-5 (V)</span>
                   <span>Salinity (ppt)</span>
                 </div>
               </div>
@@ -1028,8 +1145,8 @@ export default function App() {
             <b className="text-orange">5.8 NTU <small className="badge-pill orange">EXCURSION</small></b>
           </div>
           <div className="l-metric">
-            <small>Dissolved O₂</small>
-            <b>6.4 mg/L</b>
+            <small>MQ5 Gas</small>
+            <b>0.66 V</b>
           </div>
           <div className="l-metric">
             <small>Salinity</small>
@@ -1164,7 +1281,7 @@ export default function App() {
                 <div><small>Temperature</small><b>24.6 °C</b></div>
                 <div><small>pH</small><b>7.2</b></div>
                 <div><small>Turbidity</small><b className="text-orange">5.8 NTU</b></div>
-                <div><small>Dissolved O₂</small><b>6.4 mg/L</b></div>
+                <div><small>MQ5 Gas</small><b>0.66 V</b></div>
                 <div><small>Salinity</small><b>0.32 ppt</b></div>
               </div>
               <small className="illus-footnote">All values illustrative. No actual data connection.</small>
@@ -1288,8 +1405,8 @@ export default function App() {
                   <span className="text-orange">● Exceeds limit 5.0 NTU</span>
                 </div>
                 <div className="m-box">
-                  <small>Dissolved O₂</small>
-                  <b>6.4 mg/L</b>
+                  <small>MQ5 Gas</small>
+                  <b>0.66 V</b>
                   <span className="text-green">● Normal range</span>
                 </div>
               </div>
@@ -1417,7 +1534,7 @@ export default function App() {
               <div><small>Temperature</small><b>24.6°C</b></div>
               <div><small>pH</small><b>7.2</b></div>
               <div><small>Turbidity</small><b className="text-orange">5.8 NTU</b></div>
-              <div><small>Dissolved oxygen</small><b>6.4 mg/L</b></div>
+              <div><small>MQ5 Gas</small><b>0.66 V</b></div>
               <div><small>Salinity</small><b>0.32 ppt</b></div>
             </div>
           </div>
@@ -1565,8 +1682,8 @@ export default function App() {
             <span className="badge-pill orange">● Excursion</span>
           </div>
           <div className="card metric-card" onClick={() => setActiveTab('Water Quality Monitor')}>
-            <span className="card-lbl">Dissolved Oxygen</span>
-            <div className="metric-huge">6.4 <span className="unit">mg/L</span></div>
+            <span className="card-lbl">MQ5 Gas</span>
+            <div className="metric-huge">0.66 <span className="unit">V</span></div>
             <span className="badge-pill blue">● Live</span>
           </div>
         </div>

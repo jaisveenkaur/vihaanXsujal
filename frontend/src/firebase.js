@@ -1,7 +1,6 @@
 import { initializeApp } from 'firebase/app'
 import { getAuth } from 'firebase/auth'
 import { getFirestore } from 'firebase/firestore'
-import { getDatabase } from 'firebase/database'
 import { getAnalytics, isSupported } from 'firebase/analytics'
 
 const config = {
@@ -19,7 +18,6 @@ export const firebaseReady = Boolean(config.apiKey && config.authDomain && confi
 export const app = firebaseReady ? initializeApp(config) : null
 export const auth = app ? getAuth(app) : null
 export const db = app ? getFirestore(app) : null
-export const rtdb = app && config.databaseURL ? getDatabase(app) : null
 
 export let analytics = null
 if (typeof window !== 'undefined' && app && config.measurementId) {

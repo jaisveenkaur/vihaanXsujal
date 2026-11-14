@@ -1,33 +1,301 @@
 rules_version = '2';
+
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// Collection: devices/{deviceId}
+// Document ID: device identifier (e.g., 'SUJAL_01')
+// Fields:
+//   - device_id: string (required, 1-64 chars)
+//   - name: string (optional, 1-128 chars)
+//   - location: string (optional, 1-256 chars)
+//   - created_at: timestamp (optional)
+//   - updated_at: timestamp (optional)
+//
+// Collection: devices/{deviceId}/state/{stateId}
+// Document ID: 'latest' or timestamp
+// Fields:
+//   - device_id: string (required)
+//   - sensor_data: map (required)
+//   - actuator_feedback: map (required)
+//   - selected_channel: string ('A' or 'B')
+//   - mode: string ('AUTO' or 'MANUAL')
+//   - server_received_at: timestamp (required)
+//
+// Collection: devices/{deviceId}/readings/{readingId}
+// Document ID: auto-generated reading ID
+// Fields:
+//   - device_id: string (required)
+//   - sensor_data: map (required)
+//   - actuator_feedback: map (required)
+//   - recorded_at: timestamp (required)
+//
+// Collection: devices/{deviceId}/alerts/{alertId}
+// Document ID: alert slug (e.g., 'device-fault', 'low-flow-a')
+// Fields:
+//   - id: string (required, 1-64 chars) - immutable
+//   - severity: string (required, 'high', 'review', 'medium', 'low') - immutable
+//   - title: string (required, 1-256 chars) - immutable
+//   - detail: string (required, 1-1000 chars) - immutable
+//   - status: string (required, 'open', 'acknowledged', 'resolved')
+//   - created_at: timestamp (required) - immutable
+//   - updated_at: timestamp (optional)
+//   - acknowledged_by: string (optional, 1-128 chars UID)
+//   - acknowledged_at: timestamp (optional)
+//
+// Collection: devices/{deviceId}/commands/{commandId}
+// Document ID: 'current' or auto-generated command ID
+// Fields:
+//   - command: string (required, 'SET_CHANNEL', 'SET_MODE') - immutable
+//   - status: string (required, 'pending', 'dispatched', 'delivered', 'acknowledged', 'executed', 'failed', 'cancelled')
+//   - requested_by: string (required, UID) - immutable
+//   - created_at: timestamp (optional) - immutable
+//   - selected_channel: string ('A' or 'B' if command == 'SET_CHANNEL') - immutable
+//   - mode: string ('AUTO' or 'MANUAL' if command == 'SET_MODE') - immutable
+//   - cancelled_by: string (optional, UID)
+//   - cancelled_at: timestamp (optional)
+//   - delivered_at: timestamp (optional)
+//   - executed_at: timestamp (optional)
+//   - error: string (optional, max 1000 chars)
+//
+// Collection: operators/{operatorId}
+// Document ID: Firebase Auth UID
+// Fields:
+//   - name: string (optional, 1-128 chars)
+//   - email: string (required, valid email)
+//   - role: string (required, 'operator' or 'admin')
+//   - assigned_devices: list of string device IDs (optional, max 50 items)
+//   - created_at: timestamp (optional)
+//   - updated_at: timestamp (optional)
+//
+// Collection: users/{userId}
+// Document ID: Firebase Auth UID
+// Fields:
+//   - email: string (required, valid email)
+//   - displayName: string (optional, max 128 chars)
+//   - role: string (optional, 'operator', 'admin', 'viewer')
+//   - created_at: timestamp (optional)
+//   - updated_at: timestamp (optional)
+//
+// ===============================================================
+
 service cloud.firestore {
   match /databases/{database}/documents {
-    function signedIn() { return request.auth != null; }
+
+    // ===============================================================
+    // Authentication & Core Helper Functions
+    // ===============================================================
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function areImmutableFieldsUnchanged(fields) {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(fields);
+    }
+
+    function isValidEmail(email) {
+      return email is string &&
+        email.matches('^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$');
+    }
+
+    // ===============================================================
+    // RBAC & Device Authorization Functions
+    // ===============================================================
+
+    function isAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.get('admin', false) == true ||
+        request.auth.token.get('role', '') == 'admin' ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', '') == 'admin')
+      );
+    }
+
+    function isOperator() {
+      return isAuthenticated() && (
+        isAdmin() ||
+        request.auth.token.get('role', '') == 'operator' ||
+        exists(/databases/$(database)/documents/operators/$(request.auth.uid)) ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', '') in ['operator', 'admin'])
+      );
+    }
+
+    function hasDeviceAssignment(deviceId) {
+      return (
+        // Admins have access to all devices
+        isAdmin() ||
+        // Check custom claim device assignments
+        (('assigned_devices' in request.auth.token) && (deviceId in request.auth.token.assigned_devices)) ||
+        (('devices' in request.auth.token) && (deviceId in request.auth.token.devices)) ||
+        // Check operator document device assignment
+        (exists(/databases/$(database)/documents/operators/$(request.auth.uid)) &&
+         ('assigned_devices' in get(/databases/$(database)/documents/operators/$(request.auth.uid)).data) &&
+         (deviceId in get(/databases/$(database)/documents/operators/$(request.auth.uid)).data.assigned_devices))
+      );
+    }
+
+    function canAccessDevice(deviceId) {
+      return isOperator() && hasDeviceAssignment(deviceId);
+    }
+
+    // ===============================================================
+    // Domain Validator Functions
+    // ===============================================================
+
+    function isValidAlert(data) {
+      return data.id is string && data.id.size() > 0 && data.id.size() <= 64 &&
+        data.severity is string && data.severity in ['high', 'review', 'medium', 'low'] &&
+        data.title is string && data.title.size() > 0 && data.title.size() <= 256 &&
+        data.detail is string && data.detail.size() > 0 && data.detail.size() <= 1000 &&
+        data.status is string && data.status in ['open', 'acknowledged', 'resolved'] &&
+        (!('created_at' in data) || data.created_at is timestamp) &&
+        (!('updated_at' in data) || data.updated_at is timestamp) &&
+        (!('acknowledged_by' in data) || (data.acknowledged_by is string && data.acknowledged_by.size() <= 128)) &&
+        (!('acknowledged_at' in data) || data.acknowledged_at is timestamp);
+    }
+
+    function isValidCommand(data) {
+      return hasRequiredFields(['command', 'status', 'requested_by']) &&
+        hasOnlyAllowedFields([
+          'command', 'status', 'requested_by', 'created_at',
+          'selected_channel', 'mode',
+          'cancelled_by', 'cancelled_at',
+          'delivered_at', 'executed_at', 'error'
+        ]) &&
+        data.command is string && data.command in ['SET_CHANNEL', 'SET_MODE'] &&
+        data.status is string && data.status in ['pending', 'dispatched', 'delivered', 'acknowledged', 'executed', 'failed', 'cancelled'] &&
+        data.requested_by is string && data.requested_by.size() > 0 && data.requested_by.size() <= 128 &&
+        (data.command != 'SET_CHANNEL' || (('selected_channel' in data) && data.selected_channel in ['A', 'B'])) &&
+        (data.command != 'SET_MODE' || (('mode' in data) && data.mode in ['AUTO', 'MANUAL'])) &&
+        (!('created_at' in data) || data.created_at is timestamp) &&
+        (!('cancelled_at' in data) || data.cancelled_at is timestamp) &&
+        (!('cancelled_by' in data) || (data.cancelled_by is string && data.cancelled_by.size() <= 128)) &&
+        (!('delivered_at' in data) || data.delivered_at is timestamp) &&
+        (!('executed_at' in data) || data.executed_at is timestamp) &&
+        (!('error' in data) || (data.error is string && data.error.size() <= 1000));
+    }
+
+    function isValidOperator(data) {
+      return hasRequiredFields(['email', 'role']) &&
+        hasOnlyAllowedFields(['name', 'email', 'role', 'assigned_devices', 'created_at', 'updated_at']) &&
+        data.email is string && isValidEmail(data.email) && data.email.size() <= 128 &&
+        data.role is string && data.role in ['operator', 'admin'] &&
+        (!('name' in data) || (data.name is string && data.name.size() > 0 && data.name.size() <= 128)) &&
+        (!('assigned_devices' in data) || (data.assigned_devices is list && data.assigned_devices.size() <= 50)) &&
+        (!('created_at' in data) || data.created_at is timestamp) &&
+        (!('updated_at' in data) || data.updated_at is timestamp);
+    }
+
+    function isValidUser(data) {
+      return hasRequiredFields(['email']) &&
+        hasOnlyAllowedFields(['email', 'displayName', 'role', 'created_at', 'updated_at']) &&
+        data.email is string && isValidEmail(data.email) && data.email.size() <= 128 &&
+        (!('displayName' in data) || (data.displayName is string && data.displayName.size() <= 128)) &&
+        (!('role' in data) || (data.role is string && data.role in ['operator', 'admin', 'viewer'])) &&
+        (!('created_at' in data) || data.created_at is timestamp) &&
+        (!('updated_at' in data) || data.updated_at is timestamp);
+    }
+
+    // ===============================================================
+    // Collection Rules
+    // ===============================================================
+
+    // Root device documents
+    match /devices/{deviceId} {
+      allow read: if canAccessDevice(deviceId);
+      allow write: if isAdmin();
+    }
+
+    // Telemetry state documents (latest sensor and actuator state)
+    // Ingested strictly via Cloud Functions with backend device secret
     match /devices/{deviceId}/state/{stateId} {
-      allow read: if signedIn();
+      allow read: if canAccessDevice(deviceId);
       allow write: if false;
     }
+
+    // Append-only historical telemetry readings
+    // Ingested strictly via Cloud Functions with backend device secret
     match /devices/{deviceId}/readings/{readingId} {
-      allow read: if signedIn();
+      allow read: if canAccessDevice(deviceId);
       allow write: if false;
     }
+
+    // Operational alerts
+    // Created by Cloud Functions; acknowledged or resolved by authorized operators
     match /devices/{deviceId}/alerts/{alertId} {
-      allow read: if signedIn();
+      allow read: if canAccessDevice(deviceId);
       allow create, delete: if false;
-      allow update: if signedIn()
-        && request.resource.data.status == 'resolved'
+      allow update: if canAccessDevice(deviceId)
+        && isValidAlert(request.resource.data)
+        && resource.data.status in ['open', 'acknowledged']
+        && request.resource.data.status in ['acknowledged', 'resolved']
         && request.resource.data.acknowledged_by == request.auth.uid
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'acknowledged_by', 'acknowledged_at']);
+        && request.resource.data.acknowledged_at is timestamp
+        && request.resource.data.acknowledged_at <= request.time
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status', 'acknowledged_by', 'acknowledged_at', 'updated_at'
+        ])
+        && areImmutableFieldsUnchanged(['id', 'severity', 'title', 'detail', 'created_at']);
     }
+
+    // Operator commands (branch channel selection and mode changes)
+    // Created by authorized operators; status tracked and fulfilled by backend / ESP32
     match /devices/{deviceId}/commands/{commandId} {
-      allow read: if signedIn();
-      allow create, update: if signedIn()
-        && request.resource.data.requested_by == request.auth.uid
-        && request.resource.data.status == 'pending'
-        && request.resource.data.command in ['SET_CHANNEL', 'SET_MODE']
-        && (request.resource.data.command != 'SET_CHANNEL' || request.resource.data.selected_channel in ['A', 'B'])
-        && (request.resource.data.command != 'SET_MODE' || request.resource.data.mode in ['AUTO', 'MANUAL']);
+      allow read: if canAccessDevice(deviceId);
       allow delete: if false;
+
+      // Operator can create a new command with 'pending' status
+      allow create: if canAccessDevice(deviceId)
+        && isValidCommand(request.resource.data)
+        && request.resource.data.status == 'pending'
+        && request.resource.data.requested_by == request.auth.uid
+        && (!('created_at' in request.resource.data) || request.resource.data.created_at <= request.time);
+
+      // Operator can cancel an existing pending command
+      allow update: if canAccessDevice(deviceId)
+        && isValidCommand(request.resource.data)
+        && resource.data.status == 'pending'
+        && request.resource.data.status == 'cancelled'
+        && (resource.data.requested_by == request.auth.uid || isAdmin())
+        && request.resource.data.cancelled_by == request.auth.uid
+        && request.resource.data.cancelled_at is timestamp
+        && request.resource.data.cancelled_at <= request.time
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'cancelled_by', 'cancelled_at'])
+        && areImmutableFieldsUnchanged(['command', 'requested_by', 'created_at', 'selected_channel', 'mode']);
     }
-    match /{document=**} { allow read, write: if false; }
+
+    // Operator profiles and device assignments
+    // Managed exclusively by administrators to prevent self-privilege escalation
+    match /operators/{operatorId} {
+      allow read: if isAuthenticated() && (request.auth.uid == operatorId || isAdmin());
+      allow write: if isAdmin() && isValidOperator(request.resource.data);
+    }
+
+    // User directory documents
+    // PII protected: users can only read their own profile; roles managed by admins
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow write: if isAdmin() && isValidUser(request.resource.data);
+    }
+
+    // Default deny for all other paths
+    match /{document=**} {
+      allow read, write: if false;
+    }
   }
 }
