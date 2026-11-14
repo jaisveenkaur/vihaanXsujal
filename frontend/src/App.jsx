@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef, useMemo } from 'react'
 import {
   AlertTriangle,
   Archive,
@@ -111,6 +111,266 @@ const MAP_NODES = [
   { id: 'SJ-017', name: 'South Crossing', status: 'Alert', lat: 28.6155, lon: 77.2178, x: 74, y: 82, color: 'red' },
 ]
 
+// --- NASA GIBS Realtime Satellite Map Component ---
+function NasaSatelliteMap({ nodes, selectedNode, onSelectNode, currentLayer, showOverlays, liveState }) {
+  const mapContainerRef = useRef(null)
+  const mapInstanceRef = useRef(null)
+  const baseLayersRef = useRef({})
+  const overlayLayersRef = useRef([])
+  const markersRef = useRef({})
+  const [leafletReady, setLeafletReady] = useState(Boolean(typeof window !== 'undefined' && window.L))
+
+  useEffect(() => {
+    if (leafletReady) return undefined
+    const checkTimer = setInterval(() => {
+      if (typeof window !== 'undefined' && window.L) {
+        setLeafletReady(true)
+        clearInterval(checkTimer)
+      }
+    }, 150)
+    return () => clearInterval(checkTimer)
+  }, [leafletReady])
+
+  const latestNasaDate = useMemo(() => {
+    const d = new Date()
+    // NASA GIBS daily composites usually populate after 04:00 UTC
+    if (d.getUTCHours() < 4) {
+      d.setUTCDate(d.getUTCDate() - 1)
+    }
+    return d.toISOString().split('T')[0]
+  }, [])
+
+  useEffect(() => {
+    if (!leafletReady || !mapContainerRef.current) return undefined
+    const L = window.L
+    if (!L) return undefined
+
+    if (mapInstanceRef.current) {
+      mapInstanceRef.current.remove()
+      mapInstanceRef.current = null
+    }
+
+    const defaultLat = selectedNode?.lat || 28.6139
+    const defaultLon = selectedNode?.lon || 77.2090
+
+    const map = L.map(mapContainerRef.current, {
+      center: [defaultLat, defaultLon],
+      zoom: 13,
+      minZoom: 2,
+      maxZoom: 18,
+      zoomControl: false,
+      attributionControl: true,
+    })
+    mapInstanceRef.current = map
+
+    L.control.zoom({ position: 'bottom-right' }).addTo(map)
+
+    // 1. NASA Realtime VIIRS TrueColor (SNPP)
+    const viirsLayer = L.tileLayer(
+      `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_SNPP_CorrectedReflectance_TrueColor/default/${latestNasaDate}/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg`,
+      {
+        maxNativeZoom: 9,
+        maxZoom: 18,
+        tileSize: 256,
+        subdomains: 'abc',
+        attribution: '&copy; <a href="https://earthdata.nasa.gov/gibs" target="_blank" rel="noreferrer">NASA EOSDIS GIBS</a>',
+      }
+    )
+
+    // 2. NASA Terra MODIS TrueColor
+    const terraLayer = L.tileLayer(
+      `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/MODIS_Terra_CorrectedReflectance_TrueColor/default/${latestNasaDate}/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg`,
+      {
+        maxNativeZoom: 9,
+        maxZoom: 18,
+        tileSize: 256,
+        subdomains: 'abc',
+        attribution: '&copy; <a href="https://earthdata.nasa.gov/gibs" target="_blank" rel="noreferrer">NASA Terra MODIS</a>',
+      }
+    )
+
+    // 3. NASA Earth at Night (Black Marble)
+    const nightLayer = L.tileLayer(
+      'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_BlackMarble/default/default/GoogleMapsCompatible_Level8/{z}/{y}/{x}.png',
+      {
+        maxNativeZoom: 8,
+        maxZoom: 18,
+        tileSize: 256,
+        subdomains: 'abc',
+        attribution: '&copy; <a href="https://earthdata.nasa.gov/gibs" target="_blank" rel="noreferrer">NASA Black Marble</a>',
+      }
+    )
+
+    // 4. High-Res Street & River Hybrid Satellite (Esri World Imagery)
+    const streetSatLayer = L.tileLayer(
+      'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+      {
+        maxZoom: 18,
+        attribution: '&copy; Esri & OpenStreetMap',
+      }
+    )
+
+    baseLayersRef.current = {
+      'nasa-viirs': viirsLayer,
+      'nasa-terra': terraLayer,
+      'nasa-night': nightLayer,
+      'street-sat': streetSatLayer,
+    }
+
+    const activeLayer = baseLayersRef.current[currentLayer] || viirsLayer
+    activeLayer.addTo(map)
+
+    // NASA Coastlines, Rivers & Waterways Overlay
+    const featuresLayer = L.tileLayer(
+      'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/Reference_Features_15m/default/default/GoogleMapsCompatible_Level9/{z}/{y}/{x}.png',
+      {
+        maxNativeZoom: 9,
+        maxZoom: 18,
+        tileSize: 256,
+        opacity: 0.85,
+        zIndex: 500,
+      }
+    )
+
+    // NASA Place Labels Overlay
+    const labelsLayer = L.tileLayer(
+      'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/Reference_Labels_15m/default/default/GoogleMapsCompatible_Level9/{z}/{y}/{x}.png',
+      {
+        maxNativeZoom: 9,
+        maxZoom: 18,
+        tileSize: 256,
+        opacity: 0.9,
+        zIndex: 501,
+      }
+    )
+
+    overlayLayersRef.current = [featuresLayer, labelsLayer]
+    if (showOverlays) {
+      featuresLayer.addTo(map)
+      labelsLayer.addTo(map)
+    }
+
+    // Boundary box for 24 River View Lane
+    const riverViewBounds = [
+      [28.6115, 77.2065],
+      [28.6160, 77.2115],
+    ]
+    L.rectangle(riverViewBounds, {
+      color: '#2c94bd',
+      weight: 1.5,
+      dashArray: '4, 4',
+      fillColor: '#2c94bd',
+      fillOpacity: 0.12,
+    }).addTo(map)
+
+    // Node Markers
+    markersRef.current = {}
+    nodes.forEach((node) => {
+      const isSelected = selectedNode?.id === node.id
+      const pinColor = isSelected ? '#e06836' : node.color === 'green' ? '#35aa83' : node.color === 'amber' ? '#d8a329' : '#6b6661'
+
+      const customIcon = L.divIcon({
+        className: 'custom-nasa-pin',
+        iconSize: [80, 50],
+        iconAnchor: [40, 36],
+        html: `
+          <div class="nasa-pin-wrapper ${isSelected ? 'selected' : ''}">
+            <div class="nasa-pin-tag">${node.id}${isSelected ? ' ★' : ''}</div>
+            <div class="nasa-pin-core" style="background:${pinColor}">
+              <div class="nasa-pin-center"></div>
+              ${isSelected ? '<div class="nasa-pin-pulse"></div>' : ''}
+            </div>
+          </div>
+        `,
+      })
+
+      const marker = L.marker([node.lat, node.lon], { icon: customIcon }).addTo(map)
+      marker.on('click', () => {
+        onSelectNode(node)
+      })
+
+      marker.bindPopup(`
+        <div class="nasa-popup">
+          <div class="popup-title"><b>${node.id}</b> · ${node.name}</div>
+          <div class="popup-sub">GPS: ${node.lat.toFixed(4)}° N, ${node.lon.toFixed(4)}° E</div>
+          <div class="popup-status">Status: <b>${node.status}</b></div>
+          ${node.id === 'SJ-014' ? `
+            <div class="popup-metrics">
+              <span>Turb: <b>${liveState?.sensor_data?.turbidity_sensor?.value ?? 5.8} NTU</b></span>
+              <span>pH: <b>${liveState?.sensor_data?.ph_sensor?.value ?? 7.2}</b></span>
+              <span>MQ-5: <b>${liveState?.sensor_data?.mq5_sensor?.voltage ?? 0.66} V</b></span>
+            </div>
+          ` : ''}
+        </div>
+      `, { className: 'dark-leaflet-popup' })
+
+      markersRef.current[node.id] = marker
+    })
+
+    const timer = setTimeout(() => {
+      map.invalidateSize()
+    }, 200)
+
+    return () => {
+      clearTimeout(timer)
+      if (mapInstanceRef.current) {
+        mapInstanceRef.current.remove()
+        mapInstanceRef.current = null
+      }
+    }
+  }, [leafletReady, latestNasaDate])
+
+  // Switch base layers
+  useEffect(() => {
+    const map = mapInstanceRef.current
+    if (!map || !baseLayersRef.current) return
+    Object.keys(baseLayersRef.current).forEach((key) => {
+      const layer = baseLayersRef.current[key]
+      if (!layer) return
+      if (key === currentLayer) {
+        if (!map.hasLayer(layer)) layer.addTo(map)
+      } else {
+        if (map.hasLayer(layer)) map.removeLayer(layer)
+      }
+    })
+  }, [currentLayer])
+
+  // Switch overlays
+  useEffect(() => {
+    const map = mapInstanceRef.current
+    if (!map || !overlayLayersRef.current) return
+    overlayLayersRef.current.forEach((layer) => {
+      if (showOverlays) {
+        if (!map.hasLayer(layer)) layer.addTo(map)
+      } else {
+        if (map.hasLayer(layer)) map.removeLayer(layer)
+      }
+    })
+  }, [showOverlays])
+
+  // Pan to selected node
+  useEffect(() => {
+    const map = mapInstanceRef.current
+    if (!map || !selectedNode) return
+    map.panTo([selectedNode.lat, selectedNode.lon], { animate: true, duration: 0.8 })
+    const marker = markersRef.current[selectedNode.id]
+    if (marker) {
+      marker.openPopup()
+    }
+  }, [selectedNode])
+
+  if (!leafletReady) {
+    return (
+      <div className="dark-map-canvas" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', color: '#dedbd7' }}>
+        <div className="badge-pill purple" style={{ marginBottom: 12 }}>Connecting to NASA EOSDIS GIBS...</div>
+        <small style={{ color: '#8c8884' }}>Streaming live Earth observations & satellite telemetry</small>
+      </div>
+    )
+  }
+
+  return <div ref={mapContainerRef} id="nasa-leaflet-map" style={{ width: '100%', height: '100%' }} />
+}
+
 // --- SVG Chart Component ---
 function AreaTrendChart({ dataPoints, minVal, maxVal, color = '#2c94bd', showExcursion = false, excursionLimit = 5.0, yLabels = [] }) {
   const width = 360
@@ -209,6 +469,9 @@ export default function App() {
   const [liveCommands, setLiveCommands] = useState([])
   const [firestoreError, setFirestoreError] = useState('')
   const [commandBusy, setCommandBusy] = useState(false)
+  const [selectedMapNode, setSelectedMapNode] = useState(MAP_NODES.find((n) => n.selected) || MAP_NODES[3])
+  const [mapLayer, setMapLayer] = useState('nasa-viirs')
+  const [showMapOverlays, setShowMapOverlays] = useState(true)
 
   useEffect(() => {
     if (!firebaseReady) return undefined
@@ -1303,144 +1566,139 @@ export default function App() {
             <span>NODES: 6 TRACKED</span>
             <span className="text-amber">2 STALE GPS</span>
             <span>SNAP: 27 Oct 2026 10:32:15 IST</span>
-            <span className="badge-pill purple">ILLUSTRATIVE DATA</span>
+            <span className="badge-pill purple">🛰️ NASA GIBS REALTIME</span>
           </div>
         </header>
 
         <div className="map-stage-wrap top-gap">
-          {/* Simulated Dark Cartographic Map Canvas */}
-          <div className="dark-map-canvas">
-            <svg viewBox="0 0 1000 650" className="city-svg-map">
-              <defs>
-                <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
-                  <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#22201d" strokeWidth="0.8" />
-                </pattern>
-                <radialGradient id="nodeGlow" cx="50%" cy="50%" r="50%">
-                  <stop offset="0%" stopColor="#2c94bd" stopOpacity="0.4" />
-                  <stop offset="100%" stopColor="#2c94bd" stopOpacity="0" />
-                </radialGradient>
-              </defs>
+          {/* NASA Satellite Layer Controls */}
+          <div className="map-layer-controls">
+            <span className="layer-lbl">NASA SAT:</span>
+            <button
+              className={`layer-btn ${mapLayer === 'nasa-viirs' ? 'active' : ''}`}
+              onClick={() => setMapLayer('nasa-viirs')}
+              title="NASA Suomi-NPP VIIRS True Color Near Real-Time Orbit"
+            >
+              🛰️ VIIRS Realtime
+            </button>
+            <button
+              className={`layer-btn ${mapLayer === 'nasa-terra' ? 'active' : ''}`}
+              onClick={() => setMapLayer('nasa-terra')}
+              title="NASA Terra MODIS Daily Earth Observations"
+            >
+              🌍 Terra Daily
+            </button>
+            <button
+              className={`layer-btn ${mapLayer === 'nasa-night' ? 'active' : ''}`}
+              onClick={() => setMapLayer('nasa-night')}
+              title="NASA Earth at Night (Black Marble Night Lights)"
+            >
+              🌃 Black Marble
+            </button>
+            <button
+              className={`layer-btn ${mapLayer === 'street-sat' ? 'active' : ''}`}
+              onClick={() => setMapLayer('street-sat')}
+              title="High-Resolution Street & River Canal Satellite"
+            >
+              🗺️ Street Sat
+            </button>
+            <button
+              className={`overlay-toggle-btn ${showMapOverlays ? 'active' : ''}`}
+              onClick={() => setShowMapOverlays(!showMapOverlays)}
+              title="Toggle NASA Waterways, Coastlines, Borders & Labels"
+            >
+              🏷️ Labels {showMapOverlays ? 'ON' : 'OFF'}
+            </button>
+          </div>
 
-              {/* Grid Background */}
-              <rect width="1000" height="650" fill="#131211" />
-              <rect width="1000" height="650" fill="url(#grid)" />
+          {/* NASA GIBS Realtime Satellite Map Canvas */}
+          <div className="nasa-map-container">
+            <NasaSatelliteMap
+              nodes={MAP_NODES}
+              selectedNode={selectedMapNode}
+              onSelectNode={setSelectedMapNode}
+              currentLayer={mapLayer}
+              showOverlays={showMapOverlays}
+              liveState={liveState}
+            />
+          </div>
 
-              {/* Meandering River */}
-              <path
-                d="M -10,380 C 180,360 220,520 380,510 C 500,500 520,310 680,290 C 820,270 900,410 1010,400 L 1010,460 C 890,480 800,340 670,360 C 510,380 470,580 360,580 C 200,580 150,440 -10,450 Z"
-                fill="#182730"
-                stroke="#244558"
-                strokeWidth="2"
-              />
-
-              {/* Secondary Canals & Roads */}
-              <path d="M 120,-10 L 120,660 M 350,-10 L 350,660 M 600,-10 L 600,660 M 820,-10 L 820,660" stroke="#1d1b19" strokeWidth="2" />
-              <path d="M -10,140 L 1010,140 M -10,260 L 1010,260 M -10,480 L 1010,480" stroke="#1d1b19" strokeWidth="2" />
-              <path d="M 400,240 C 480,240 560,240 640,240" stroke="#2d404e" strokeWidth="6" strokeOpacity="0.5" />
-
-              {/* Highlight Area for River View Lane */}
-              <rect x="520" y="210" width="180" height="50" rx="6" fill="#2c94bd" fillOpacity="0.15" stroke="#2c94bd" strokeOpacity="0.4" strokeDasharray="3,3" />
-              <text x="610" y="240" fill="#a4d7ec" fontSize="11" textAnchor="middle" fontWeight="bold">
-                24 River View Ln
-              </text>
-
-              {/* Nodes */}
-              {MAP_NODES.map((n) => {
-                const cx = (n.x * 1000) / 100
-                const cy = (n.y * 650) / 100
-                const isSelected = n.selected
-
-                return (
-                  <g key={n.id} className="map-node-pin">
-                    {isSelected && (
-                      <>
-                        <circle cx={cx} cy={cy} r="32" fill="url(#nodeGlow)" />
-                        <circle cx={cx} cy={cy} r="20" fill="none" stroke="#2c94bd" strokeWidth="1.5" strokeDasharray="3,3" />
-                      </>
-                    )}
-                    <circle cx={cx} cy={cy} r="12" fill={isSelected ? '#e06836' : n.color === 'green' ? '#35aa83' : n.color === 'amber' ? '#d8a329' : '#4a4642'} />
-                    <circle cx={cx} cy={cy} r="5" fill="#ffffff" />
-                    <rect x={cx - 36} y={cy - 28} width="72" height="17" rx="4" fill="#1b1918" stroke="#3b3733" />
-                    <text x={cx} y={cy - 16} fill="#ffffff" fontSize="9" fontWeight="bold" textAnchor="middle">
-                      {n.id} {isSelected ? '★' : ''}
-                    </text>
-                  </g>
-                )
-              })}
-            </svg>
-
-            {/* Left Node Inspector Overlay */}
-            <div className="card map-node-drawer">
-              <div className="drawer-header">
-                <div>
-                  <div className="drawer-title">
-                    <b>SJ-014</b>
-                    <span className="badge-pill red">● ALERT</span>
-                    <span className="badge-pill purple">★ Nearest (provisional)</span>
-                  </div>
-                  <small>River View Inlet · North River District</small>
+          {/* Left Node Inspector Overlay */}
+          <div className="card map-node-drawer">
+            <div className="drawer-header">
+              <div>
+                <div className="drawer-title">
+                  <b>{selectedMapNode.id}</b>
+                  <span className={`badge-pill ${selectedMapNode.color === 'red' ? 'red' : selectedMapNode.color === 'green' ? 'green' : 'amber'}`}>
+                    ● {selectedMapNode.status.toUpperCase()}
+                  </span>
+                  {selectedMapNode.selected && <span className="badge-pill purple">★ Nearest (provisional)</span>}
                 </div>
-              </div>
-
-              <div className="drawer-gps-status top-gap">
-                <span>📍 GPS LOCK 28.6139° N 77.2090° E <small className="badge-pill green">±4 m</small></span>
-                <span>⚙ DEV: ESP32-S3 ID D4:F9:8D:2A:11:3E <small className="badge-pill amber">PKT: 92%</small></span>
-                <span>⏱ Snapshot: 27 Oct 2026 10:32:15 IST <small className="badge-pill purple">ILLUS</small></span>
-              </div>
-
-              <div className="drawer-readings-grid top-gap">
-                <div className="m-box">
-                  <small>Temperature</small>
-                  <b>24.6 °C</b>
-                  <span className="text-green">● Normal range</span>
-                </div>
-                <div className="m-box">
-                  <small>pH Level</small>
-                  <b>7.2 pH</b>
-                  <span className="text-green">● Normal range</span>
-                </div>
-                <div className="m-box">
-                  <small>Turbidity</small>
-                  <b className="text-orange">5.8 NTU</b>
-                  <span className="text-orange">● Exceeds limit 5.0 NTU</span>
-                </div>
-                <div className="m-box">
-                  <small>MQ5 Gas</small>
-                  <b>0.66 V</b>
-                  <span className="text-green">● Normal range</span>
-                </div>
-              </div>
-
-              <div className="drawer-actions-row top-gap">
-                <button className="btn-action-primary" onClick={() => setActiveTab('Records')}>
-                  View Records
-                </button>
-                <button className="btn-action-danger" onClick={() => setActiveTab('Alerts')}>
-                  Open Alerts (2)
-                </button>
-                <button className="btn-action-secondary" onClick={() => setActiveTab('Log')}>
-                  Node Log
-                </button>
+                <small>{selectedMapNode.name} · North River District</small>
               </div>
             </div>
 
-            {/* Right GPS Telemetry List */}
-            <div className="card map-telemetry-drawer">
-              <div className="sec-title">GPS TELEMETRY — ALL NODES</div>
-              <div className="nodes-telemetry-list top-gap">
-                {MAP_NODES.map((n) => (
-                  <div key={n.id} className={`node-telemetry-item ${n.selected ? 'active' : ''}`}>
-                    <span className={`status-dot ${n.color}`} />
-                    <span className="node-lbl">{n.id}</span>
-                    <span className="coord-txt">
-                      {n.lat.toFixed(4)}° N {n.lon.toFixed(4)}° E
-                    </span>
-                    <span className={`badge-pill ${n.color === 'green' ? 'green' : n.color === 'red' ? 'red' : 'muted'}`}>
-                      {n.status.split('·')[0]}
-                    </span>
-                  </div>
-                ))}
+            <div className="drawer-gps-status top-gap">
+              <span>📍 GPS LOCK {selectedMapNode.lat.toFixed(4)}° N {selectedMapNode.lon.toFixed(4)}° E <small className="badge-pill green">±4 m</small></span>
+              <span>⚙ DEV: ESP32-S3 ID D4:F9:8D:2A:11:3E <small className="badge-pill amber">PKT: 92%</small></span>
+              <span>⏱ Snapshot: 27 Oct 2026 10:32:15 IST <small className="badge-pill purple">ILLUS</small></span>
+            </div>
+
+            <div className="drawer-readings-grid top-gap">
+              <div className="m-box">
+                <small>Temperature</small>
+                <b>{selectedMapNode.id === 'SJ-014' && liveState?.sensor_data?.temperature_sensor?.value ? `${liveState.sensor_data.temperature_sensor.value} °C` : '24.6 °C'}</b>
+                <span className="text-green">● Normal range</span>
               </div>
+              <div className="m-box">
+                <small>pH Level</small>
+                <b>{selectedMapNode.id === 'SJ-014' && liveState?.sensor_data?.ph_sensor?.value ? `${liveState.sensor_data.ph_sensor.value} pH` : '7.2 pH'}</b>
+                <span className="text-green">● Normal range</span>
+              </div>
+              <div className="m-box">
+                <small>Turbidity</small>
+                <b className="text-orange">{selectedMapNode.id === 'SJ-014' && liveState?.sensor_data?.turbidity_sensor?.value ? `${liveState.sensor_data.turbidity_sensor.value} NTU` : '5.8 NTU'}</b>
+                <span className="text-orange">● Exceeds limit 5.0 NTU</span>
+              </div>
+              <div className="m-box">
+                <small>MQ5 Gas</small>
+                <b>{selectedMapNode.id === 'SJ-014' && liveState?.sensor_data?.mq5_sensor?.voltage ? `${liveState.sensor_data.mq5_sensor.voltage} V` : '0.66 V'}</b>
+                <span className="text-green">● Normal range</span>
+              </div>
+            </div>
+
+            <div className="drawer-actions-row top-gap">
+              <button className="btn-action-primary" onClick={() => setActiveTab('Records')}>
+                View Records
+              </button>
+              <button className="btn-action-danger" onClick={() => setActiveTab('Alerts')}>
+                Open Alerts (2)
+              </button>
+              <button className="btn-action-secondary" onClick={() => setActiveTab('Log')}>
+                Node Log
+              </button>
+            </div>
+          </div>
+
+          {/* Right GPS Telemetry List */}
+          <div className="card map-telemetry-drawer">
+            <div className="sec-title">GPS TELEMETRY — ALL NODES</div>
+            <div className="nodes-telemetry-list top-gap">
+              {MAP_NODES.map((n) => (
+                <div
+                  key={n.id}
+                  className={`node-telemetry-item ${selectedMapNode.id === n.id ? 'active' : ''}`}
+                  onClick={() => setSelectedMapNode(n)}
+                  style={{ cursor: 'pointer' }}
+                >
+                  <span className={`status-dot ${n.color}`} />
+                  <span className="node-lbl">{n.id}</span>
+                  <span className="coord-txt">
+                    {n.lat.toFixed(4)}° N {n.lon.toFixed(4)}° E
+                  </span>
+                  <span className="badge-pill muted">{n.status.split('·')[0].trim()}</span>
+                </div>
+              ))}
             </div>
           </div>
         </div>

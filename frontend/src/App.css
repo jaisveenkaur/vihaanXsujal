@@ -2144,3 +2144,248 @@ body {
     margin: 10px;
   }
 }
+
+/* ===============================================================
+   NASA GIBS Realtime Satellite Map & Leaflet Dark Styles
+   =============================================================== */
+.nasa-map-container {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  background: #131211;
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.nasa-map-container .leaflet-container {
+  width: 100%;
+  height: 100%;
+  background: #131211 !important;
+  font-family: inherit;
+}
+
+.map-layer-controls {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  z-index: 1001;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(25, 23, 22, 0.94);
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+}
+
+.map-layer-controls .layer-lbl {
+  font-size: 10px;
+  font-family: monospace;
+  color: var(--muted);
+  text-transform: uppercase;
+  margin-right: 2px;
+  letter-spacing: 0.5px;
+}
+
+.map-layer-controls .layer-btn {
+  background: #1b1918;
+  border: 1px solid var(--border);
+  color: #a5a19d;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 4px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.map-layer-controls .layer-btn:hover {
+  background: #252220;
+  color: #fff;
+  border-color: #4a4642;
+}
+
+.map-layer-controls .layer-btn.active {
+  background: #2c94bd;
+  color: #fff;
+  border-color: #2c94bd;
+  font-weight: 600;
+  box-shadow: 0 2px 8px rgba(44, 148, 189, 0.35);
+}
+
+.map-layer-controls .overlay-toggle-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.map-layer-controls .overlay-toggle-btn.active {
+  color: #35aa83;
+  border-color: #35aa83;
+  background: rgba(53, 170, 131, 0.12);
+}
+
+/* Custom NASA Pin Markers */
+.custom-nasa-pin {
+  background: transparent !important;
+  border: none !important;
+}
+
+.nasa-pin-wrapper {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  cursor: pointer;
+}
+
+.nasa-pin-tag {
+  background: #1b1918;
+  border: 1px solid #3b3733;
+  color: #ffffff;
+  font-size: 9px;
+  font-weight: bold;
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-bottom: 2px;
+  white-space: nowrap;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.6);
+  transition: all 0.15s ease;
+}
+
+.nasa-pin-wrapper.selected .nasa-pin-tag {
+  background: #2c94bd;
+  border-color: #2c94bd;
+  color: #ffffff;
+}
+
+.nasa-pin-core {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.7);
+}
+
+.nasa-pin-center {
+  width: 7px;
+  height: 7px;
+  background: #ffffff;
+  border-radius: 50%;
+}
+
+.nasa-pin-pulse {
+  position: absolute;
+  top: -12px;
+  left: -12px;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 2px dashed #2c94bd;
+  animation: nasa-pulse 2s infinite ease-out;
+}
+
+@keyframes nasa-pulse {
+  0% { transform: scale(0.6); opacity: 0.9; }
+  100% { transform: scale(1.4); opacity: 0; }
+}
+
+/* Leaflet Dark Theme Overrides */
+.leaflet-bar {
+  border: 1px solid var(--border) !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5) !important;
+  border-radius: 8px !important;
+  overflow: hidden;
+}
+
+.leaflet-bar a {
+  background: rgba(25, 23, 22, 0.94) !important;
+  color: #dedbd7 !important;
+  border-bottom: 1px solid var(--border) !important;
+}
+
+.leaflet-bar a:hover {
+  background: #272422 !important;
+  color: #fff !important;
+}
+
+.leaflet-control-attribution {
+  background: rgba(19, 18, 17, 0.88) !important;
+  color: #8c8884 !important;
+  font-size: 9px !important;
+  padding: 2px 8px !important;
+  border-radius: 4px;
+  backdrop-filter: blur(4px);
+}
+
+.leaflet-control-attribution a {
+  color: #a4d7ec !important;
+}
+
+.dark-leaflet-popup .leaflet-popup-content-wrapper {
+  background: rgba(27, 25, 24, 0.96) !important;
+  color: #dedbd7 !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 8px !important;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6) !important;
+}
+
+.dark-leaflet-popup .leaflet-popup-tip {
+  background: rgba(27, 25, 24, 0.96) !important;
+}
+
+.nasa-popup {
+  padding: 4px 2px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.nasa-popup .popup-title {
+  font-size: 12px;
+  color: #ffffff;
+  margin-bottom: 3px;
+}
+
+.nasa-popup .popup-sub {
+  color: var(--muted);
+  font-size: 10px;
+  font-family: monospace;
+}
+
+.nasa-popup .popup-status {
+  margin-top: 4px;
+  color: #dedbd7;
+}
+
+.nasa-popup .popup-metrics {
+  margin-top: 6px;
+  display: flex;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 5px;
+  font-size: 10px;
+}
+
+@media (max-width: 840px) {
+  .map-layer-controls {
+    top: auto;
+    bottom: 12px;
+    right: 12px;
+    left: 12px;
+    justify-content: center;
+    flex-wrap: wrap;
+    font-size: 10px;
+  }
+}
+
