@@ -1,0 +1,33 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    match /devices/{deviceId}/state/{stateId} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+    match /devices/{deviceId}/readings/{readingId} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+    match /devices/{deviceId}/alerts/{alertId} {
+      allow read: if signedIn();
+      allow create, delete: if false;
+      allow update: if signedIn()
+        && request.resource.data.status == 'resolved'
+        && request.resource.data.acknowledged_by == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'acknowledged_by', 'acknowledged_at']);
+    }
+    match /devices/{deviceId}/commands/{commandId} {
+      allow read: if signedIn();
+      allow create, update: if signedIn()
+        && request.resource.data.requested_by == request.auth.uid
+        && request.resource.data.status == 'pending'
+        && request.resource.data.command in ['SET_CHANNEL', 'SET_MODE']
+        && (request.resource.data.command != 'SET_CHANNEL' || request.resource.data.selected_channel in ['A', 'B'])
+        && (request.resource.data.command != 'SET_MODE' || request.resource.data.mode in ['AUTO', 'MANUAL']);
+      allow delete: if false;
+    }
+    match /{document=**} { allow read, write: if false; }
+  }
+}
