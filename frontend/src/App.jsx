@@ -1,4 +1,10 @@
-import { useEffect, useState, useRef, useMemo } from 'react'
+import { useEffect, useState, useRef, useMemo, Component } from 'react'
+import L from 'leaflet'
+import 'leaflet/dist/leaflet.css'
+
+if (typeof window !== 'undefined') {
+  window.L = L
+}
 import {
   AlertTriangle,
   Archive,
@@ -111,6 +117,38 @@ const MAP_NODES = [
   { id: 'SJ-017', name: 'South Crossing', status: 'Alert', lat: 28.6155, lon: 77.2178, x: 74, y: 82, color: 'red' },
 ]
 
+// --- React Error Boundary ---
+class ErrorBoundary extends Component {
+  constructor(props) {
+    super(props)
+    this.state = { hasError: false, error: null }
+  }
+
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error }
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.error('UI Error Caught by ErrorBoundary:', error, errorInfo)
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ padding: 40, textAlign: 'center', background: '#191716', color: '#dedbd7', borderRadius: 10, margin: 24, border: '1px solid #3d3a36' }}>
+          <div className="badge-pill orange" style={{ marginBottom: 14 }}>Display Notice</div>
+          <h2 style={{ marginBottom: 8 }}>Unable to load view</h2>
+          <p style={{ color: '#8c8884', fontSize: 13, marginBottom: 18 }}>{this.state.error?.message || 'A display error occurred'}</p>
+          <button className="btn-action-primary" onClick={() => { this.setState({ hasError: false, error: null }); window.location.reload() }}>
+            Reload Application
+          </button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
 // --- NASA GIBS Realtime Satellite Map Component ---
 function NasaSatelliteMap({ nodes, selectedNode, onSelectNode, currentLayer, showOverlays, liveState }) {
   const mapContainerRef = useRef(null)
@@ -118,78 +156,57 @@ function NasaSatelliteMap({ nodes, selectedNode, onSelectNode, currentLayer, sho
   const baseLayersRef = useRef({})
   const labelsLayerRef = useRef(null)
   const markersRef = useRef({})
-  const [leafletReady, setLeafletReady] = useState(Boolean(typeof window !== 'undefined' && window.L))
-
-  // Dynamically ensure Leaflet is loaded
-  useEffect(() => {
-    if (typeof window === 'undefined') return undefined
-    if (window.L) {
-      setLeafletReady(true)
-      return undefined
-    }
-
-    let isMounted = true
-    const checkTimer = setInterval(() => {
-      if (window.L && isMounted) {
-        setLeafletReady(true)
-        clearInterval(checkTimer)
-      }
-    }, 100)
-
-    // Fallback script tag injector if head script didn't fire
-    if (!document.getElementById('leaflet-cdn-script')) {
-      const link = document.createElement('link')
-      link.id = 'leaflet-cdn-style'
-      link.rel = 'stylesheet'
-      link.href = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css'
-      document.head.appendChild(link)
-
-      const script = document.createElement('script')
-      script.id = 'leaflet-cdn-script'
-      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js'
-      script.onload = () => {
-        if (isMounted) setLeafletReady(true)
-      }
-      document.head.appendChild(script)
-    }
-
-    return () => {
-      isMounted = false
-      clearInterval(checkTimer)
-    }
-  }, [])
+  const [mapError, setMapError] = useState(null)
 
   useEffect(() => {
-    if (!leafletReady || !mapContainerRef.current) return undefined
-    const L = window.L
-    if (!L) return undefined
+    if (!mapContainerRef.current) return undefined
 
-    // Clean up existing map instance or residual container ID to prevent double-initialization
-    if (mapInstanceRef.current) {
-      mapInstanceRef.current.remove()
-      mapInstanceRef.current = null
-    }
-    if (mapContainerRef.current._leaflet_id) {
-      mapContainerRef.current._leaflet_id = null
-      delete mapContainerRef.current._leaflet_id
-    }
+    try {
+      // Fix default Leaflet icon paths in Vite
+      if (L.Icon && L.Icon.Default && L.Icon.Default.prototype._getIconUrl) {
+        delete L.Icon.Default.prototype._getIconUrl
+        L.Icon.Default.mergeOptions({
+          iconRetinaUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon-2x.png',
+          iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon.png',
+          shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png',
+        })
+      }
 
-    const defaultLat = selectedNode?.lat || 28.6139
-    const defaultLon = selectedNode?.lon || 77.2090
+      // Clean up residual Leaflet ID to prevent initialization collision
+      if (mapInstanceRef.current) {
+        mapInstanceRef.current.remove()
+        mapInstanceRef.current = null
+      }
+      if (mapContainerRef.current._leaflet_id) {
+        mapContainerRef.current._leaflet_id = null
+        delete mapContainerRef.current._leaflet_id
+      }
 
-    const map = L.map(mapContainerRef.current, {
-      center: [defaultLat, defaultLon],
-      zoom: 13,
-      minZoom: 2,
-      maxZoom: 19,
-      zoomControl: false,
-      attributionControl: true,
-    })
-    mapInstanceRef.current = map
+      const defaultLat = selectedNode?.lat || 28.6139
+      const defaultLon = selectedNode?.lon || 77.2090
 
-    L.control.zoom({ position: 'bottom-right' }).addTo(map)
+      const map = L.map(mapContainerRef.current, {
+        center: [defaultLat, defaultLon],
+        zoom: 13,
+        minZoom: 2,
+        maxZoom: 19,
+        zoomControl: false,
+        attributionControl: true,
+      })
+      mapInstanceRef.current = map
 
-    // 1. NASA Realtime VIIRS TrueColor (Suomi-NPP) - Latest available daily composite
+      L.control.zoom({ position: 'bottomright' }).addTo(map)
+
+    // 1. High-Res Street & River Hybrid Satellite (Esri World Imagery)
+    const streetSatLayer = L.tileLayer(
+      'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+      {
+        maxZoom: 19,
+        attribution: '&copy; Esri & OpenStreetMap',
+      }
+    )
+
+    // 2. NASA Realtime VIIRS TrueColor (Suomi-NPP) - Latest available daily composite
     const viirsLayer = L.tileLayer(
       'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_SNPP_CorrectedReflectance_TrueColor/default/default/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg',
       {
@@ -201,7 +218,7 @@ function NasaSatelliteMap({ nodes, selectedNode, onSelectNode, currentLayer, sho
       }
     )
 
-    // 2. NASA Terra MODIS TrueColor - Daily multispectral reflectance
+    // 3. NASA Terra MODIS TrueColor - Daily multispectral reflectance
     const terraLayer = L.tileLayer(
       'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/MODIS_Terra_CorrectedReflectance_TrueColor/default/default/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg',
       {
@@ -213,7 +230,7 @@ function NasaSatelliteMap({ nodes, selectedNode, onSelectNode, currentLayer, sho
       }
     )
 
-    // 3. NASA Earth at Night (Black Marble) - Night lights observation
+    // 4. NASA Earth at Night (Black Marble) - Night lights observation
     const nightLayer = L.tileLayer(
       'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_BlackMarble/default/default/GoogleMapsCompatible_Level8/{z}/{y}/{x}.png',
       {
@@ -225,33 +242,23 @@ function NasaSatelliteMap({ nodes, selectedNode, onSelectNode, currentLayer, sho
       }
     )
 
-    // 4. High-Res Street & River Hybrid Satellite (Esri World Imagery)
-    const streetSatLayer = L.tileLayer(
-      'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-      {
-        maxZoom: 19,
-        attribution: '&copy; Esri & OpenStreetMap',
-      }
-    )
-
     baseLayersRef.current = {
+      'street-sat': streetSatLayer,
       'nasa-viirs': viirsLayer,
       'nasa-terra': terraLayer,
       'nasa-night': nightLayer,
-      'street-sat': streetSatLayer,
     }
 
     const activeBase = baseLayersRef.current[currentLayer] || streetSatLayer
     activeBase.addTo(map)
 
-    // Transparent dark street, waterway & place labels overlay
+    // Transparent street, waterway & place labels overlay (100% free, no API key required)
     const labels = L.tileLayer(
-      'https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png',
+      'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
       {
-        subdomains: 'abcd',
         maxZoom: 19,
         zIndex: 600,
-        attribution: '&copy; <a href="https://carto.com/">CARTO</a>',
+        attribution: '&copy; Esri & OpenStreetMap',
       }
     )
     labelsLayerRef.current = labels
@@ -316,11 +323,11 @@ function NasaSatelliteMap({ nodes, selectedNode, onSelectNode, currentLayer, sho
       markersRef.current[node.id] = marker
     })
 
-    // Invalidate size on load and on window resize to ensure full 640px height rendering
+    // Invalidate size on load and on resize
     const timers = [
-      setTimeout(() => map.invalidateSize(), 100),
-      setTimeout(() => map.invalidateSize(), 300),
-      setTimeout(() => map.invalidateSize(), 700),
+      setTimeout(() => map.invalidateSize(), 50),
+      setTimeout(() => map.invalidateSize(), 200),
+      setTimeout(() => map.invalidateSize(), 600),
     ]
 
     const handleResize = () => map.invalidateSize()
@@ -334,45 +341,71 @@ function NasaSatelliteMap({ nodes, selectedNode, onSelectNode, currentLayer, sho
         mapInstanceRef.current = null
       }
     }
-  }, [leafletReady])
+    } catch (err) {
+      console.error('NasaSatelliteMap error:', err)
+      setMapError(err.message || 'Error initializing satellite map engine')
+    }
+  }, [])
 
   // Switch base layers
   useEffect(() => {
-    const map = mapInstanceRef.current
-    if (!map || !baseLayersRef.current) return
-    Object.keys(baseLayersRef.current).forEach((key) => {
-      const layer = baseLayersRef.current[key]
-      if (!layer) return
-      if (key === currentLayer) {
-        if (!map.hasLayer(layer)) layer.addTo(map)
-      } else {
-        if (map.hasLayer(layer)) map.removeLayer(layer)
-      }
-    })
+    try {
+      const map = mapInstanceRef.current
+      if (!map || !baseLayersRef.current) return
+      Object.keys(baseLayersRef.current).forEach((key) => {
+        const layer = baseLayersRef.current[key]
+        if (!layer) return
+        if (key === currentLayer) {
+          if (!map.hasLayer(layer)) layer.addTo(map)
+        } else {
+          if (map.hasLayer(layer)) map.removeLayer(layer)
+        }
+      })
+    } catch (e) {
+      console.warn('Layer switch error:', e)
+    }
   }, [currentLayer])
 
   // Switch overlays
   useEffect(() => {
-    const map = mapInstanceRef.current
-    const labels = labelsLayerRef.current
-    if (!map || !labels) return
-    if (showOverlays) {
-      if (!map.hasLayer(labels)) labels.addTo(map)
-    } else {
-      if (map.hasLayer(labels)) map.removeLayer(labels)
+    try {
+      const map = mapInstanceRef.current
+      const labels = labelsLayerRef.current
+      if (!map || !labels) return
+      if (showOverlays) {
+        if (!map.hasLayer(labels)) labels.addTo(map)
+      } else {
+        if (map.hasLayer(labels)) map.removeLayer(labels)
+      }
+    } catch (e) {
+      console.warn('Overlay switch error:', e)
     }
   }, [showOverlays])
 
   // Pan to selected node
   useEffect(() => {
-    const map = mapInstanceRef.current
-    if (!map || !selectedNode) return
-    map.panTo([selectedNode.lat, selectedNode.lon], { animate: true, duration: 0.8 })
-    const marker = markersRef.current[selectedNode.id]
-    if (marker) {
-      marker.openPopup()
+    try {
+      const map = mapInstanceRef.current
+      if (!map || !selectedNode) return
+      map.panTo([selectedNode.lat, selectedNode.lon], { animate: true, duration: 0.8 })
+      const marker = markersRef.current[selectedNode.id]
+      if (marker) {
+        marker.openPopup()
+      }
+    } catch (e) {
+      console.warn('Pan error:', e)
     }
   }, [selectedNode])
+
+  if (mapError) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', minHeight: 640, background: '#131211', color: '#dedbd7', gap: 12 }}>
+        <div className="badge-pill orange">Satellite Engine Notice</div>
+        <p style={{ color: '#8c8884', fontSize: '13px' }}>{mapError}</p>
+        <button className="btn-action-primary" onClick={() => setMapError(null)}>Retry Map Connection</button>
+      </div>
+    )
+  }
 
   return (
     <div
@@ -381,18 +414,11 @@ function NasaSatelliteMap({ nodes, selectedNode, onSelectNode, currentLayer, sho
       style={{
         width: '100%',
         height: '100%',
-        position: 'absolute',
-        inset: 0,
+        minHeight: '640px',
+        position: 'relative',
         background: '#131211',
       }}
-    >
-      {!leafletReady && (
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', flexDirection: 'column', color: '#dedbd7' }}>
-          <div className="badge-pill purple" style={{ marginBottom: 12 }}>Connecting to NASA EOSDIS GIBS...</div>
-          <small style={{ color: '#8c8884' }}>Streaming live Earth observations & satellite telemetry</small>
-        </div>
-      )}
-    </div>
+    />
   )
 }
 
@@ -495,7 +521,7 @@ export default function App() {
   const [firestoreError, setFirestoreError] = useState('')
   const [commandBusy, setCommandBusy] = useState(false)
   const [selectedMapNode, setSelectedMapNode] = useState(MAP_NODES.find((n) => n.selected) || MAP_NODES[3])
-  const [mapLayer, setMapLayer] = useState('nasa-viirs')
+  const [mapLayer, setMapLayer] = useState('street-sat')
   const [showMapOverlays, setShowMapOverlays] = useState(true)
 
   useEffect(() => {
@@ -2114,7 +2140,9 @@ export default function App() {
         </div>
 
         <div className="content-wrap">
-          {getContent()}
+          <ErrorBoundary key={activeTab}>
+            {getContent()}
+          </ErrorBoundary>
 
           <footer className="app-footer">
             <span>SUJAL <i>·</i> NODE SJ-014 RIVER VIEW INLET</span>
