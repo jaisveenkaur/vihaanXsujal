@@ -101,6 +101,12 @@ function validatePacket(body) {
     if (!isNullableNumber(s.turbidity_sensor?.value, 0, 1000)) errors.push('turbidity must be 0 to 1000 NTU.')
     if (!isNullableNumber(s.mq5_sensor?.voltage, 0, 5)) errors.push('mq5 voltage must be 0 to 5 V.')
   }
+  const loc = body.location || body.gps
+  if (loc !== undefined && loc !== null) {
+    if (!isObject(loc) || !isNumber(loc.lat, -90, 90) || !isNumber(loc.lon, -180, 180)) {
+      errors.push('location/gps must be an object with valid lat (-90 to 90) and lon (-180 to 180).')
+    }
+  }
   return errors
 }
 
@@ -164,6 +170,7 @@ const server = http.createServer(async (req, res) => {
           clog_estimate: body.clog_estimate || null,
           actuator_feedback: body.actuator_feedback || null,
           verification_data: body.verification_data || null,
+          location: body.location || body.gps || null,
           server_received_at: now,
           recorded_at: now,
         }

@@ -101,6 +101,7 @@ function validateTelemetryPacket(packet) {
   const allowedRootKeys = [
     'device_id', 'sequence', 'sequence_number', 'uptime_ms', 'mode', 'selected_channel',
     'sensor_data', 'verification_data', 'clog_estimate', 'actuator_feedback', 'treatment',
+    'location', 'gps',
   ]
 
   if (!hasOnlyKeys(packet, allowedRootKeys)) return ['Packet must be a JSON object with only documented fields.']
