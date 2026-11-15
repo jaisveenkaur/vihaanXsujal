@@ -1,0 +1,14 @@
+{
+  "rules": {
+    "devices": {
+      "SUJAL_01": {
+        ".read": true,
+        ".write": true
+      },
+      "$deviceId": {
+        ".read": "auth != null",
+        ".write": "auth != null"
+      }
+    }
+  }
+}

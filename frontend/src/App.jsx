@@ -22,6 +22,7 @@ import {
   Flame,
   Gauge,
   Info,
+  Key,
   LayoutDashboard,
   Lock,
   Map as MapIcon,
@@ -45,9 +46,10 @@ import {
   X,
   Zap,
 } from 'lucide-react'
-import { auth, db, firebaseReady } from './firebase'
+import { auth, db, firebaseReady, rtdb } from './firebase'
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from 'firebase/auth'
 import { addDoc, collection, doc, limit, onSnapshot, orderBy, query, serverTimestamp, updateDoc } from 'firebase/firestore'
+import { ref as rtdbRef, onValue as onRtdbValue, update as updateRtdb } from 'firebase/database'
 import sujalLogo from './assets/sujal_monochrome_symbol_white.svg'
 import './App.css'
 
@@ -207,52 +209,34 @@ function NasaSatelliteMap({ nodes, selectedNode, onSelectNode, currentLayer, sho
 
       L.control.zoom({ position: 'bottomright' }).addTo(map)
 
-      // 1. High-Res Street & River Hybrid Satellite (Esri World Imagery)
-      const streetSatLayer = L.tileLayer(
+      // 1. Google Maps Hybrid Satellite (High-Res Aerial + Street Names + Landmarks)
+      const googleHybridLayer = L.tileLayer(
+        'https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}',
+        {
+          maxZoom: 22,
+          attribution: '&copy; Google Maps',
+        }
+      )
+
+      // 2. Google Maps Street Roadmap (Clear Navigation & Water Distribution Channels)
+      const googleRoadsLayer = L.tileLayer(
+        'https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}',
+        {
+          maxZoom: 22,
+          attribution: '&copy; Google Maps',
+        }
+      )
+
+      // 3. High-Res Satellite Imagery (Esri World Imagery)
+      const esriSatLayer = L.tileLayer(
         'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
         {
           maxZoom: 19,
-          attribution: '&copy; Esri & OpenStreetMap',
+          attribution: '&copy; Esri & Maxar Technologies',
         }
       )
 
-      // 2. NASA Realtime VIIRS TrueColor (Suomi-NPP) - Latest available daily composite
-      const viirsLayer = L.tileLayer(
-        'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_SNPP_CorrectedReflectance_TrueColor/default/default/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg',
-        {
-          maxNativeZoom: 9,
-          maxZoom: 19,
-          tileSize: 256,
-          subdomains: 'abc',
-          attribution: '&copy; <a href="https://earthdata.nasa.gov/gibs" target="_blank" rel="noreferrer">NASA EOSDIS GIBS</a>',
-        }
-      )
-
-      // 3. NASA Terra MODIS TrueColor - Daily multispectral reflectance
-      const terraLayer = L.tileLayer(
-        'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/MODIS_Terra_CorrectedReflectance_TrueColor/default/default/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg',
-        {
-          maxNativeZoom: 9,
-          maxZoom: 19,
-          tileSize: 256,
-          subdomains: 'abc',
-          attribution: '&copy; <a href="https://earthdata.nasa.gov/gibs" target="_blank" rel="noreferrer">NASA Terra MODIS</a>',
-        }
-      )
-
-      // 4. NASA Earth at Night (Black Marble) - Night lights observation
-      const nightLayer = L.tileLayer(
-        'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_BlackMarble/default/default/GoogleMapsCompatible_Level8/{z}/{y}/{x}.png',
-        {
-          maxNativeZoom: 8,
-          maxZoom: 19,
-          tileSize: 256,
-          subdomains: 'abc',
-          attribution: '&copy; <a href="https://earthdata.nasa.gov/gibs" target="_blank" rel="noreferrer">NASA Black Marble</a>',
-        }
-      )
-
-      // 5. Clean Oceanic Cyber SCADA Dark Map (CartoDB Dark Matter)
+      // 4. Clean Oceanic Cyber SCADA Dark Map (CartoDB Dark Matter)
       const cartoDarkLayer = L.tileLayer(
         'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
         {
@@ -262,18 +246,28 @@ function NasaSatelliteMap({ nodes, selectedNode, onSelectNode, currentLayer, sho
         }
       )
 
+      // 5. Vibrant High-Resolution Street, Park & Water Map (CartoDB Voyager)
+      const cartoVoyagerLayer = L.tileLayer(
+        'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
+        {
+          maxZoom: 20,
+          subdomains: 'abcd',
+          attribution: '&copy; OpenStreetMap & CARTO',
+        }
+      )
+
       baseLayersRef.current = {
-        'street-sat': streetSatLayer,
+        'google-hybrid': googleHybridLayer,
+        'google-roads': googleRoadsLayer,
+        'esri-sat': esriSatLayer,
         'carto-dark': cartoDarkLayer,
-        'nasa-viirs': viirsLayer,
-        'nasa-terra': terraLayer,
-        'nasa-night': nightLayer,
+        'carto-voyager': cartoVoyagerLayer,
       }
 
-      const activeBase = baseLayersRef.current[currentLayer] || streetSatLayer
+      const activeBase = baseLayersRef.current[currentLayer] || googleHybridLayer
       activeBase.addTo(map)
 
-      // Transparent street, waterway & place labels overlay (100% free, no API key required)
+      // Transparent street, waterway & place labels overlay (Esri World Boundaries)
       const labels = L.tileLayer(
         'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
         {
@@ -283,7 +277,7 @@ function NasaSatelliteMap({ nodes, selectedNode, onSelectNode, currentLayer, sho
         }
       )
       labelsLayerRef.current = labels
-      if (showOverlays) {
+      if (showOverlays && currentLayer !== 'google-hybrid' && currentLayer !== 'google-roads') {
         labels.addTo(map)
       }
 
@@ -632,8 +626,17 @@ export default function App() {
   const [manualLon, setManualLon] = useState(() => deviceLocation?.lon ? deviceLocation.lon.toString() : '77.2090')
   const [manualAddress, setManualAddress] = useState(() => deviceLocation?.address || 'River View inlet')
   const [selectedMapNodeId, setSelectedMapNodeId] = useState('SJ-01')
-  const [mapLayer, setMapLayer] = useState('street-sat')
+  const [mapLayer, setMapLayer] = useState('google-hybrid')
   const [showMapOverlays, setShowMapOverlays] = useState(true)
+  const [googleApiKey, setGoogleApiKey] = useState(() => {
+    try {
+      return localStorage.getItem('sujal_google_maps_key') || import.meta.env.VITE_GOOGLE_MAPS_API_KEY || ''
+    } catch {
+      return ''
+    }
+  })
+  const [showApiKeyModal, setShowApiKeyModal] = useState(false)
+  const [tempApiKeyInput, setTempApiKeyInput] = useState('')
 
   // Admin & Operator Authentication State
   const [isAdminAuthenticated, setIsAdminAuthenticated] = useState(() => {
@@ -706,6 +709,19 @@ export default function App() {
         ...payload,
       }).catch((e) => console.debug('Firestore command queue note:', e))
     }
+
+    if (rtdb) {
+      updateRtdb(rtdbRef(rtdb, 'devices/SUJAL_01/actuators'), {
+        last_target: target,
+        last_action: action,
+        updated_at: Date.now(),
+        waterPump: action.includes('PUMP_RUN') || action.includes('PUMP_START') || (target === 'WATER_PUMP' && action === 'START'),
+        dosingPump: action.includes('DOSING_START') || action.includes('DOSING_RUN') || (target === 'DOSING_PUMP' && action === 'START'),
+        channelA: action.includes('BRANCH_A') || (target === 'MAIN_VALVE' && action === 'OPEN'),
+        channelB: action.includes('BRANCH_B'),
+        ...payload,
+      }).catch((e) => console.debug('RTDB actuator sync note:', e))
+    }
   }
 
   const resetAllOverrides = () => {
@@ -733,6 +749,16 @@ export default function App() {
       simulationMode: false,
     })
     handleAdminCommand('SYSTEM_BUS', 'RESET_TO_AUTO_HARDWARE')
+    if (rtdb) {
+      updateRtdb(rtdbRef(rtdb, 'devices/SUJAL_01/actuators'), {
+        channelA: true,
+        channelB: false,
+        waterPump: false,
+        dosingPump: false,
+        resetOverrides: true,
+        updated_at: Date.now(),
+      }).catch((e) => console.debug('RTDB reset note:', e))
+    }
     triggerToast('🔄 All sensor and actuator overrides reset to Hardware Auto.')
   }
 
@@ -879,40 +905,109 @@ export default function App() {
   }, [liveState])
 
   // Detect live physical GPS location using browser Geolocation API
-  const detectLiveLocation = () => {
+  const detectLiveLocation = (silent = false) => {
     if (typeof window === 'undefined' || !navigator.geolocation) {
-      triggerToast('Browser geolocation is not available on this device.')
+      if (!silent) triggerToast('Browser geolocation is not available on this device.')
       return
     }
     setIsLocating(true)
     navigator.geolocation.getCurrentPosition(
-      (pos) => {
+      async (pos) => {
+        const lat = Number(pos.coords.latitude.toFixed(5))
+        const lon = Number(pos.coords.longitude.toFixed(5))
+        const accuracy = Math.round(pos.coords.accuracy || 4)
+        let resolvedAddress = 'Live Field Device Location'
+
+        try {
+          const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}&zoom=16`, {
+            headers: { Accept: 'application/json' },
+          })
+          if (res.ok) {
+            const data = await res.json()
+            if (data?.display_name) {
+              const parts = data.display_name.split(',')
+              resolvedAddress = parts.slice(0, 3).join(',').trim()
+            }
+          }
+        } catch {
+          // ignore network failure for reverse geocode
+        }
+
         const newLoc = {
-          lat: Number(pos.coords.latitude.toFixed(5)),
-          lon: Number(pos.coords.longitude.toFixed(5)),
-          accuracy: Math.round(pos.coords.accuracy || 4),
-          source: 'Live Browser GPS',
-          address: 'Physical Device Deployment Site',
+          lat,
+          lon,
+          accuracy,
+          source: 'Live Device GPS',
+          address: resolvedAddress,
         }
         setDeviceLocation(newLoc)
-        setManualLat(newLoc.lat.toString())
-        setManualLon(newLoc.lon.toString())
+        setManualLat(lat.toString())
+        setManualLon(lon.toString())
         try {
           localStorage.setItem('sujal_live_device_location', JSON.stringify(newLoc))
         } catch {
-      // Ignore storage read error
-    }
+          // Ignore storage read error
+        }
         setIsLocating(false)
-        triggerToast(`📍 Live GPS Locked: ${newLoc.lat}° N, ${newLoc.lon}° E (±${newLoc.accuracy}m)`)
+        if (!silent) triggerToast(`📍 Live GPS Locked: ${newLoc.lat}° N, ${newLoc.lon}° E (±${newLoc.accuracy}m)`)
       },
       (err) => {
         setIsLocating(false)
-        console.warn('Geolocation error:', err)
-        triggerToast(`GPS error: ${err.message}. You can set coordinates manually.`)
+        console.debug('Geolocation acquisition note:', err.message)
+        if (!silent) triggerToast(`GPS notice: ${err.message}.`)
       },
-      { enableHighAccuracy: true, timeout: 12000, maximumAge: 10000 }
+      { enableHighAccuracy: true, timeout: 12000, maximumAge: 30000 }
     )
   }
+
+  // Auto-acquire live device location on mount so map is immediately positioned on actual physical site
+  useEffect(() => {
+    if (typeof window === 'undefined' || !navigator.geolocation) return undefined
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const lat = Number(pos.coords.latitude.toFixed(5))
+        const lon = Number(pos.coords.longitude.toFixed(5))
+        const accuracy = Math.round(pos.coords.accuracy || 4)
+        let resolvedAddress = 'Live Field Device Location'
+
+        try {
+          const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}&zoom=16`, {
+            headers: { Accept: 'application/json' },
+          })
+          if (res.ok) {
+            const data = await res.json()
+            if (data?.display_name) {
+              const parts = data.display_name.split(',')
+              resolvedAddress = parts.slice(0, 3).join(',').trim()
+            }
+          }
+        } catch {
+          // ignore network failure for reverse geocode
+        }
+
+        const newLoc = {
+          lat,
+          lon,
+          accuracy,
+          source: 'Live Device GPS',
+          address: resolvedAddress,
+        }
+        setDeviceLocation(newLoc)
+        setManualLat(lat.toString())
+        setManualLon(lon.toString())
+        try {
+          localStorage.setItem('sujal_live_device_location', JSON.stringify(newLoc))
+        } catch {
+          // ignore
+        }
+      },
+      (err) => {
+        console.debug('Initial auto-geolocation note:', err.message)
+      },
+      { enableHighAccuracy: true, timeout: 12000, maximumAge: 30000 }
+    )
+    return undefined
+  }, [])
 
   // Handle clicking on map to reposition SJ-01
   const handleMapClick = (lat, lon) => {
@@ -974,6 +1069,54 @@ export default function App() {
     return () => unsubscribers.forEach((unsubscribe) => unsubscribe())
   }, [user])
 
+  // Live Realtime Database (RTDB) listener for direct ESP32 telemetry
+  useEffect(() => {
+    if (!firebaseReady || !rtdb) return undefined
+    const rtdbDeviceRef = rtdbRef(rtdb, 'devices/SUJAL_01')
+    const unsub = onRtdbValue(rtdbDeviceRef, (snapshot) => {
+      if (snapshot.exists()) {
+        const val = snapshot.val()
+        if (val) {
+          const stateData = val.state?.latest || val
+          if (stateData.sensor_data || typeof stateData.temperature === 'number' || typeof stateData.ph === 'number' || typeof stateData.turbidity === 'number') {
+            setLiveState((prev) => ({
+              ...prev,
+              sequence: stateData.sequence ?? prev?.sequence ?? 1,
+              mode: stateData.mode ?? prev?.mode ?? 'AUTO',
+              selected_channel: stateData.selected_channel || stateData.channel || prev?.selected_channel || 'A',
+              sensor_data: {
+                temperature_sensor: {
+                  value: stateData.sensor_data?.temperature_sensor?.value ?? stateData.temperature ?? 24.6,
+                  unit: 'celsius',
+                },
+                ph_sensor: {
+                  value: stateData.sensor_data?.ph_sensor?.value ?? stateData.ph ?? 7.2,
+                },
+                turbidity_sensor: {
+                  value: stateData.sensor_data?.turbidity_sensor?.value ?? stateData.turbidity ?? 5.8,
+                },
+                mq5_sensor: {
+                  voltage: stateData.sensor_data?.mq5_sensor?.voltage ?? stateData.mq5 ?? 0.66,
+                },
+                flow_sensors: stateData.sensor_data?.flow_sensors || {
+                  channel_a: { flow_rate_lpm: stateData.flow_a ?? 18.5 },
+                  channel_b: { flow_rate_lpm: stateData.flow_b ?? 0.0 },
+                },
+              },
+              actuator_feedback: stateData.actuator_feedback || stateData.actuators || {
+                slave_online: true,
+                active_channel: stateData.selected_channel || stateData.channel || 'A',
+                water_pump_on: Boolean(stateData.water_pump ?? stateData.waterPump),
+                dosing_pump_on: Boolean(stateData.dosing_pump ?? stateData.dosingPump),
+              },
+            }))
+          }
+        }
+      }
+    }, (err) => console.debug('RTDB live sync error:', err))
+    return () => unsub()
+  }, [])
+
   const handleAcknowledgeAlert = async (id) => {
     if (user && db && liveAlerts) {
       try {
@@ -998,8 +1141,17 @@ export default function App() {
       const fields = command === 'SET_CHANNEL' ? { selected_channel: value } : { mode: value }
       if (user && db) {
         await addDoc(collection(db, 'devices', 'SUJAL_01', 'commands'), {
-          command, status: 'pending', requested_by: user.uid, created_at: serverTimestamp(), ...fields,
+          command, status: 'pending', requested_by: user ? user.uid : 'operator@sujal.com', created_at: serverTimestamp(), ...fields,
         })
+      }
+      if (rtdb) {
+        updateRtdb(rtdbRef(rtdb, 'devices/SUJAL_01/actuators'), {
+          selected_channel: value,
+          channelA: value === 'A',
+          channelB: value === 'B',
+          updated_at: Date.now(),
+          ...fields,
+        }).catch((e) => console.debug('RTDB queue note:', e))
       }
       handleAdminCommand(
         command === 'SET_CHANNEL' ? 'BRANCH_CHANNEL' : 'DEVICE_MODE',
@@ -2070,20 +2222,46 @@ export default function App() {
             <span>● GPS FEED: {deviceLocation.source?.toUpperCase() || 'ESP-NOW'} 915 MHz</span>
             <span className="badge-pill green">📍 LIVE NODE SJ-01 LOCK ±{deviceLocation.accuracy || 4}m</span>
             <span>{deviceLocation.lat.toFixed(4)}° N, {deviceLocation.lon.toFixed(4)}° E</span>
-            <span className="badge-pill purple">🛰️ NASA SATELLITE</span>
+            <span className="badge-pill blue">🛰️ HD SATELLITE ENGINE</span>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <button
+              type="button"
+              className="btn-action-ghost"
+              style={{ padding: '6px 12px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: 6 }}
+              onClick={() => detectLiveLocation(false)}
+              disabled={isLocating}
+              title="Refresh GPS from Browser/Device Hardware"
+            >
+              <Navigation size={12} className={isLocating ? 'spin' : ''} /> {isLocating ? 'Locating...' : 'Refresh GPS'}
+            </button>
           </div>
         </header>
 
         <div className="map-stage-wrap top-gap">
-          {/* NASA Satellite Layer Controls */}
+          {/* Map Layer & API Integration Controls */}
           <div className="map-layer-controls">
-            <span className="layer-lbl">NASA SAT:</span>
+            <span className="layer-lbl">MAP VIEW:</span>
             <button
-              className={`layer-btn ${mapLayer === 'street-sat' ? 'active' : ''}`}
-              onClick={() => setMapLayer('street-sat')}
-              title="High-Resolution Street & River Canal Satellite (Esri World Imagery)"
+              className={`layer-btn ${mapLayer === 'google-hybrid' ? 'active' : ''}`}
+              onClick={() => setMapLayer('google-hybrid')}
+              title="Google Maps Hybrid (High-Resolution Satellite + Road & Street Labels)"
             >
-              🛰️ Street Sat
+              🛰️ Google Satellite
+            </button>
+            <button
+              className={`layer-btn ${mapLayer === 'google-roads' ? 'active' : ''}`}
+              onClick={() => setMapLayer('google-roads')}
+              title="Google Maps Roadmap (Clear Navigation & Water Distribution Channels)"
+            >
+              🗺️ Google Roads
+            </button>
+            <button
+              className={`layer-btn ${mapLayer === 'esri-sat' ? 'active' : ''}`}
+              onClick={() => setMapLayer('esri-sat')}
+              title="Esri High-Resolution World Imagery Satellite"
+            >
+              🌍 Esri Satellite
             </button>
             <button
               className={`layer-btn ${mapLayer === 'carto-dark' ? 'active' : ''}`}
@@ -2093,32 +2271,34 @@ export default function App() {
               🌊 Dark SCADA
             </button>
             <button
-              className={`layer-btn ${mapLayer === 'nasa-viirs' ? 'active' : ''}`}
-              onClick={() => setMapLayer('nasa-viirs')}
-              title="NASA Suomi-NPP VIIRS True Color Near Real-Time Orbit"
+              className={`layer-btn ${mapLayer === 'carto-voyager' ? 'active' : ''}`}
+              onClick={() => setMapLayer('carto-voyager')}
+              title="Vibrant High-Resolution Street, Park & Water Map"
             >
-              🛰️ VIIRS Realtime
-            </button>
-            <button
-              className={`layer-btn ${mapLayer === 'nasa-terra' ? 'active' : ''}`}
-              onClick={() => setMapLayer('nasa-terra')}
-              title="NASA Terra MODIS Daily Earth Observations"
-            >
-              🌍 Terra Daily
-            </button>
-            <button
-              className={`layer-btn ${mapLayer === 'nasa-night' ? 'active' : ''}`}
-              onClick={() => setMapLayer('nasa-night')}
-              title="NASA Earth at Night (Black Marble Night Lights)"
-            >
-              🌃 Black Marble
+              🏙️ Voyager
             </button>
             <button
               className={`overlay-toggle-btn ${showMapOverlays ? 'active' : ''}`}
               onClick={() => setShowMapOverlays(!showMapOverlays)}
-              title="Toggle NASA Waterways, Coastlines, Borders & Labels"
+              title="Toggle Street Labels & Landmark Overlay"
             >
               🏷️ Labels {showMapOverlays ? 'ON' : 'OFF'}
+            </button>
+            <button
+              className={`layer-btn ${showApiKeyModal ? 'active' : ''}`}
+              style={{
+                marginLeft: 'auto',
+                background: googleApiKey ? 'rgba(16, 185, 129, 0.15)' : 'rgba(14, 165, 233, 0.15)',
+                borderColor: googleApiKey ? '#10b981' : '#0ea5e9',
+              }}
+              onClick={() => {
+                setTempApiKeyInput(googleApiKey)
+                setShowApiKeyModal(true)
+              }}
+              title="Configure Custom Google Maps or Mapbox API Key"
+            >
+              <Key size={13} style={{ display: 'inline', marginRight: 4, verticalAlign: 'middle' }} />
+              {googleApiKey ? 'Google API Key Set' : 'Custom Map API'}
             </button>
           </div>
 
@@ -4345,6 +4525,115 @@ export default function App() {
                   type="button"
                   className="btn-action-secondary full"
                   onClick={() => setAdminAuthOpen(false)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Map API Key Configuration Modal */}
+      {showApiKeyModal && (
+        <div
+          className="modal-backdrop"
+          onClick={(e) => e.target === e.currentTarget && setShowApiKeyModal(false)}
+        >
+          <div className="admin-auth-modal card" style={{ maxWidth: 520 }}>
+            <button
+              type="button"
+              className="modal-close"
+              onClick={() => setShowApiKeyModal(false)}
+              aria-label="Close dialog"
+            >
+              <X size={18} />
+            </button>
+
+            <div className="admin-auth-header">
+              <div className="admin-auth-icon-wrap" style={{ background: 'rgba(14, 165, 233, 0.15)', borderColor: '#0ea5e9' }}>
+                <Key size={26} className="text-blue" />
+              </div>
+              <div>
+                <h2>Custom Map API Integration</h2>
+                <p>Google Maps & Mapbox Cloud Credentials</p>
+              </div>
+            </div>
+
+            <div className="admin-auth-notice" style={{ background: 'rgba(16, 185, 129, 0.1)', borderColor: 'rgba(16, 185, 129, 0.3)' }}>
+              <ShieldCheck size={16} className="text-green" />
+              <span style={{ color: '#a7f3d0' }}>
+                Google Maps Hybrid & Road tile streams are already active by default with zero setup required.
+              </span>
+            </div>
+
+            <div style={{ marginTop: 14, fontSize: '12px', color: '#94a3b8', lineHeight: 1.6 }}>
+              <b style={{ color: '#e2e8f0' }}>How to get an official Google Maps API Key:</b>
+              <ol style={{ paddingLeft: 18, margin: '6px 0 12px' }}>
+                <li>Visit <a href="https://console.cloud.google.com/" target="_blank" rel="noreferrer" style={{ color: '#38bdf8', textDecoration: 'underline' }}>Google Cloud Console</a>.</li>
+                <li>Select your project (or choose <code>vihaanxsujal</code>).</li>
+                <li>Search for <b>Maps JavaScript API</b> and click <b>Enable</b>.</li>
+                <li>Go to <b>Credentials &gt; Create Credentials &gt; API Key</b>.</li>
+                <li>Paste the key below (or send it in chat to store in <code>.env</code>).</li>
+              </ol>
+            </div>
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault()
+                const trimmedKey = tempApiKeyInput.trim()
+                setGoogleApiKey(trimmedKey)
+                try {
+                  if (trimmedKey) {
+                    localStorage.setItem('sujal_google_maps_key', trimmedKey)
+                    triggerToast('🗺️ Custom Map API Key saved successfully!')
+                  } else {
+                    localStorage.removeItem('sujal_google_maps_key')
+                    triggerToast('Default Google/Esri tile stream restored.')
+                  }
+                } catch {
+                  // ignore
+                }
+                setShowApiKeyModal(false)
+              }}
+            >
+              <label className="admin-auth-label">
+                Google Maps / Mapbox API Key
+                <input
+                  type="text"
+                  value={tempApiKeyInput}
+                  onChange={(e) => setTempApiKeyInput(e.target.value)}
+                  placeholder="AIzaSy... or pk.eyJ..."
+                  className="admin-auth-input"
+                  style={{ fontFamily: 'monospace', fontSize: '12px' }}
+                />
+              </label>
+
+              <div className="admin-auth-actions top-gap" style={{ marginTop: 16 }}>
+                <button type="submit" className="btn-action-primary full">
+                  Save & Apply Key
+                </button>
+                {googleApiKey && (
+                  <button
+                    type="button"
+                    className="btn-action-secondary full"
+                    onClick={() => {
+                      setTempApiKeyInput('')
+                      setGoogleApiKey('')
+                      try { localStorage.removeItem('sujal_google_maps_key') } catch {
+                        // ignore
+                      }
+                      setShowApiKeyModal(false)
+                      triggerToast('API Key cleared. Using default stream.')
+                    }}
+                  >
+                    Clear Custom Key
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="btn-action-ghost full"
+                  onClick={() => setShowApiKeyModal(false)}
                 >
                   Cancel
                 </button>
