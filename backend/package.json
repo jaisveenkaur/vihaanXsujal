@@ -4,8 +4,9 @@
   "engines": { "node": "20" },
   "main": "index.js",
   "scripts": {
-    "check": "node --check index.js",
-    "lint": "node --check index.js"
+    "start": "node server.js",
+    "check": "node --check index.js && node --check server.js",
+    "lint": "node --check index.js && node --check server.js"
   },
   "dependencies": {
     "firebase-admin": "^13.0.0",

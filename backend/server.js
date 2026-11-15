@@ -45,6 +45,7 @@ const PORT = process.env.PORT || 5001
 const DEVICE_INGEST_KEY = process.env.DEVICE_INGEST_KEY || 'sujal_default_secure_key_2026'
 const DEFAULT_DEVICE_ID = 'SUJAL_01'
 const DEVICE_ID_PATTERN = /^[A-Za-z0-9_-]{3,32}$/
+const MAX_BODY_BYTES = 32 * 1024
 
 function safeCompare(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false
@@ -130,8 +131,17 @@ const server = http.createServer(async (req, res) => {
   // POST /ingestTelemetry
   if (pathname === '/ingestTelemetry' && req.method === 'POST') {
     let bodyData = ''
-    req.on('data', (chunk) => { bodyData += chunk })
+    let tooLarge = false
+    req.on('data', (chunk) => {
+      bodyData += chunk
+      if (bodyData.length > MAX_BODY_BYTES) {
+        tooLarge = true
+        sendJson(413, { error: 'Payload too large. Maximum 32 KB allowed.' })
+        req.destroy()
+      }
+    })
     req.on('end', async () => {
+      if (tooLarge) return
       try {
         const body = JSON.parse(bodyData)
         const deviceId = body.device_id || DEFAULT_DEVICE_ID
@@ -208,8 +218,17 @@ const server = http.createServer(async (req, res) => {
   // POST /ackDeviceCommand
   if (pathname === '/ackDeviceCommand' && req.method === 'POST') {
     let bodyData = ''
-    req.on('data', (chunk) => { bodyData += chunk })
+    let tooLarge = false
+    req.on('data', (chunk) => {
+      bodyData += chunk
+      if (bodyData.length > MAX_BODY_BYTES) {
+        tooLarge = true
+        sendJson(413, { error: 'Payload too large. Maximum 32 KB allowed.' })
+        req.destroy()
+      }
+    })
     req.on('end', async () => {
+      if (tooLarge) return
       try {
         const body = JSON.parse(bodyData)
         const deviceId = body.device_id || DEFAULT_DEVICE_ID
